@@ -12,6 +12,7 @@ dependencies = []
 [project.optional-dependencies]
 pdf = ["pypdf>=5,<7"]
 dev = ["pytest>=8,<10"]
+plugins = ["sovereign-workbench-plugins @ git+https://github.com/domannand95-svg/sovereign-workbench-plugins.git@967ec94"]
 
 [project.scripts]
 skw = "sovereign_workbench.cli:main"

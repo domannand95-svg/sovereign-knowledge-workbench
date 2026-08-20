@@ -16,6 +16,9 @@ This repository is the orchestration and review layer between local files,
 local models, BKI validation, and Sovereign authorization. It does not replace
 either repository or acquire their authority.
 
+The optional runtime plugin pack is pinned to the reviewed commit of
+[Sovereign Workbench Plugins](https://github.com/domannand95-svg/sovereign-workbench-plugins).
+
 ## Responsibility boundary
 
 | System | Responsibility |
@@ -56,6 +59,17 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,pdf]"
 .\.venv\Scripts\python.exe -m pytest
 ```
+
+Install and use the governed plugin pack:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[plugins]"
+.\.venv\Scripts\skw.exe plugin-list
+.\.venv\Scripts\skw.exe plugin-run privacy.detect C:\path\to\document.md
+```
+
+Plugin results must be candidate-only, declare `authority: none`, and bind to
+the exact source SHA-256 or the Workbench rejects them.
 
 Read-only deterministic analysis to standard output:
 

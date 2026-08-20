@@ -8,6 +8,7 @@ from pathlib import Path
 from .adapters import AdapterError, request_sovereign_authorization, validate_with_bki
 from .package import build_review_package, canonical_json, write_review_package
 from .pipeline import analyze_workspace
+from .plugins import PluginRuntimeError, list_plugins, run_plugin
 
 
 def parser() -> argparse.ArgumentParser:
@@ -28,12 +29,28 @@ def parser() -> argparse.ArgumentParser:
     validate.add_argument("--source", required=True, type=Path)
     validate.add_argument("--candidate", required=True, type=Path)
     validate.add_argument("--bki-root", required=True, type=Path)
+
+    commands.add_parser("plugin-list", help="List installed governed plugins")
+    plugin = commands.add_parser("plugin-run", help="Run one hash-bound candidate-only plugin")
+    plugin.add_argument("plugin_id")
+    plugin.add_argument("path", type=Path)
+    plugin.add_argument("--max-file-mb", type=int, default=100)
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "plugin-list":
+            print(json.dumps(list_plugins(), ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.command == "plugin-run":
+            print(json.dumps(
+                run_plugin(args.plugin_id, args.path, max_bytes=args.max_file_mb * 1024 * 1024),
+                ensure_ascii=False,
+                sort_keys=True,
+            ))
+            return 0
         if args.command == "bki-validate":
             print(json.dumps(validate_with_bki(args.source, args.candidate, args.bki_root), ensure_ascii=False, sort_keys=True))
             return 0
@@ -59,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sys.stdout.buffer.write(canonical_json(package))
         return 0
-    except (AdapterError, OSError, ValueError) as exc:
+    except (AdapterError, PluginRuntimeError, OSError, ValueError) as exc:
         print(f"workbench failed closed: {exc}", file=sys.stderr)
         return 3
 
