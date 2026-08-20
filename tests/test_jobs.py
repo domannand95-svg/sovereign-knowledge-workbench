@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 
 from sovereign_plugins.contracts import hash_file
-from sovereign_workbench.jobs import connect, enqueue, recover_interrupted, run_pending, status_counts
+from sovereign_workbench.jobs import connect, enqueue, failed_jobs, recover_interrupted, run_pending, status_counts
 
 
 def test_jobs_are_idempotent_and_resumable(tmp_path: Path):
@@ -24,6 +24,11 @@ def test_changed_source_fails_closed(tmp_path: Path):
         enqueue(database, "privacy.detect", source, hash_file(source))
         source.write_text("changed", encoding="utf-8")
         assert run_pending(database) == {"completed": 0, "failed": 1}
+        failures = failed_jobs(database)
+        assert len(failures) == 1
+        assert failures[0]["plugin_id"] == "privacy.detect"
+        assert failures[0]["attempts"] == 1
+        assert "Source changed" in str(failures[0]["error"])
 
 
 def test_running_job_is_recovered_after_interruption(tmp_path: Path):
@@ -35,3 +40,12 @@ def test_running_job_is_recovered_after_interruption(tmp_path: Path):
         database.commit()
         assert recover_interrupted(database) == 1
         assert status_counts(database)["pending"] == 1
+
+
+def test_configured_size_limit_reaches_worker(tmp_path: Path):
+    source = tmp_path / "note.md"
+    source.write_text("longer than four bytes", encoding="utf-8")
+    with connect(tmp_path / "state.db") as database:
+        enqueue(database, "privacy.detect", source, hash_file(source), max_bytes=4)
+        assert run_pending(database) == {"completed": 0, "failed": 1}
+        assert failed_jobs(database)[0]["error"] == "Input exceeds configured size limit"

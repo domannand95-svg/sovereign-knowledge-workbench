@@ -9,7 +9,7 @@ from .adapters import AdapterError, request_sovereign_authorization, validate_wi
 from .package import build_review_package, canonical_json, write_review_package
 from .pipeline import analyze_workspace
 from .plugins import PluginRuntimeError, list_plugins, run_plugin
-from .jobs import connect, enqueue, run_pending, status_counts
+from .jobs import connect, enqueue, failed_jobs, run_pending, status_counts
 from .roles import RolePolicyError, evaluate_tool_eligibility, load_role_policy
 
 
@@ -50,6 +50,9 @@ def parser() -> argparse.ArgumentParser:
 
     jobs = commands.add_parser("jobs-status", help="Show durable plugin job counts")
     jobs.add_argument("--state-db", required=True, type=Path)
+    failures = commands.add_parser("jobs-failures", help="Show bounded durable plugin failures")
+    failures.add_argument("--state-db", required=True, type=Path)
+    failures.add_argument("--limit", type=int, default=25)
     return root
 
 
@@ -63,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
             with connect(args.state_db) as database:
                 print(json.dumps(status_counts(database), sort_keys=True))
             return 0
+        if args.command == "jobs-failures":
+            with connect(args.state_db) as database:
+                print(json.dumps(failed_jobs(database, limit=args.limit), sort_keys=True))
+            return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file
             eligibility = evaluate_tool_eligibility(load_role_policy(args.roles), args.role, args.plugin_id)
@@ -75,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
                 for path in sorted(args.root.resolve(strict=True).rglob("*")):
                     if admitted >= args.limit or path.is_symlink() or not path.is_file() or path.suffix.casefold() not in suffixes:
                         continue
-                    enqueue(database, args.plugin_id, path, hash_file(path, maximum))
+                    enqueue(database, args.plugin_id, path, hash_file(path, maximum), max_bytes=maximum)
                     admitted += 1
                 outcome = run_pending(database, limit=args.limit)
                 print(json.dumps({"admitted": admitted, **outcome, "status": status_counts(database)}, sort_keys=True))
