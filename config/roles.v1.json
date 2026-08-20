@@ -1,0 +1,17 @@
+{
+  "contract_version": "sovereign.workbench.roles.v1",
+  "roles": {
+    "archivist": {
+      "plugins": ["archive.inspect", "document.extract", "media.metadata", "privacy.detect"],
+      "human_approval": false
+    },
+    "privacy-reviewer": {
+      "plugins": ["document.extract", "media.metadata", "privacy.detect"],
+      "human_approval": true
+    },
+    "researcher": {
+      "plugins": ["document.extract", "research.claims"],
+      "human_approval": false
+    }
+  }
+}

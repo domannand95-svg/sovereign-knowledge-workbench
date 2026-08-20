@@ -71,6 +71,20 @@ Install and use the governed plugin pack:
 Plugin results must be candidate-only, declare `authority: none`, and bind to
 the exact source SHA-256 or the Workbench rejects them.
 
+Resumable role-bounded batch processing:
+
+```powershell
+.\.venv\Scripts\skw.exe plugin-batch research.claims C:\path\to\archive `
+  --state-db workbench-output\jobs.db `
+  --include .md .txt `
+  --limit 25 `
+  --role researcher `
+  --roles config\roles.v1.json
+```
+
+Role eligibility permits a tool request; it is not an execution capability.
+Effectful plugins will additionally require a one-time Sovereign grant.
+
 Read-only deterministic analysis to standard output:
 
 ```powershell

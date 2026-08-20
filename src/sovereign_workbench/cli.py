@@ -9,6 +9,8 @@ from .adapters import AdapterError, request_sovereign_authorization, validate_wi
 from .package import build_review_package, canonical_json, write_review_package
 from .pipeline import analyze_workspace
 from .plugins import PluginRuntimeError, list_plugins, run_plugin
+from .jobs import connect, enqueue, run_pending, status_counts
+from .roles import RolePolicyError, evaluate_tool_eligibility, load_role_policy
 
 
 def parser() -> argparse.ArgumentParser:
@@ -35,6 +37,19 @@ def parser() -> argparse.ArgumentParser:
     plugin.add_argument("plugin_id")
     plugin.add_argument("path", type=Path)
     plugin.add_argument("--max-file-mb", type=int, default=100)
+
+    batch = commands.add_parser("plugin-batch", help="Queue and run a bounded resumable plugin batch")
+    batch.add_argument("plugin_id")
+    batch.add_argument("root", type=Path)
+    batch.add_argument("--state-db", required=True, type=Path)
+    batch.add_argument("--include", nargs="+", required=True)
+    batch.add_argument("--limit", type=int, default=25)
+    batch.add_argument("--max-file-mb", type=int, default=100)
+    batch.add_argument("--role", required=True)
+    batch.add_argument("--roles", required=True, type=Path)
+
+    jobs = commands.add_parser("jobs-status", help="Show durable plugin job counts")
+    jobs.add_argument("--state-db", required=True, type=Path)
     return root
 
 
@@ -43,6 +58,27 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "plugin-list":
             print(json.dumps(list_plugins(), ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.command == "jobs-status":
+            with connect(args.state_db) as database:
+                print(json.dumps(status_counts(database), sort_keys=True))
+            return 0
+        if args.command == "plugin-batch":
+            from sovereign_plugins.contracts import hash_file
+            eligibility = evaluate_tool_eligibility(load_role_policy(args.roles), args.role, args.plugin_id)
+            if not eligibility["eligible"]:
+                raise RolePolicyError(eligibility["reason"])
+            suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}
+            maximum = args.max_file_mb * 1024 * 1024
+            with connect(args.state_db) as database:
+                admitted = 0
+                for path in sorted(args.root.resolve(strict=True).rglob("*")):
+                    if admitted >= args.limit or path.is_symlink() or not path.is_file() or path.suffix.casefold() not in suffixes:
+                        continue
+                    enqueue(database, args.plugin_id, path, hash_file(path, maximum))
+                    admitted += 1
+                outcome = run_pending(database, limit=args.limit)
+                print(json.dumps({"admitted": admitted, **outcome, "status": status_counts(database)}, sort_keys=True))
             return 0
         if args.command == "plugin-run":
             print(json.dumps(
@@ -76,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sys.stdout.buffer.write(canonical_json(package))
         return 0
-    except (AdapterError, PluginRuntimeError, OSError, ValueError) as exc:
+    except (AdapterError, PluginRuntimeError, RolePolicyError, OSError, ValueError) as exc:
         print(f"workbench failed closed: {exc}", file=sys.stderr)
         return 3
 

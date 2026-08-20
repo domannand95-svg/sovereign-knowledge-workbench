@@ -5,6 +5,7 @@ import hashlib
 import os
 import shlex
 import subprocess
+import sqlite3
 from pathlib import Path
 
 
@@ -57,4 +58,14 @@ def request_sovereign_authorization(proposal: dict) -> dict:
         or receipt.get("target") != proposal.get("target")
     ):
         raise AdapterError("Sovereign authorizer did not return a bounded grant")
+    ledger_path = os.environ.get("SKW_GRANT_LEDGER")
+    if not ledger_path:
+        raise AdapterError("SKW_GRANT_LEDGER is required for atomic one-time grant consumption")
+    with sqlite3.connect(ledger_path) as ledger:
+        ledger.execute("CREATE TABLE IF NOT EXISTS consumed_grants(grant_id TEXT PRIMARY KEY, consumed_at TEXT DEFAULT CURRENT_TIMESTAMP)")
+        try:
+            ledger.execute("INSERT INTO consumed_grants(grant_id) VALUES(?)", (receipt["grant_id"],))
+            ledger.commit()
+        except sqlite3.IntegrityError as exc:
+            raise AdapterError("Sovereign grant was already consumed") from exc
     return receipt
