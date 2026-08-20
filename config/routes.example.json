@@ -1,0 +1,17 @@
+{
+  "academic-review": {
+    "description": "Candidate package for a university or research collaborator",
+    "modules": ["research", "evidence"],
+    "requires": ["citation_review", "privacy_review", "human_approval"]
+  },
+  "government-briefing": {
+    "description": "Candidate briefing for a government body",
+    "modules": ["governance", "evidence"],
+    "requires": ["jurisdiction_review", "privacy_review", "human_approval"]
+  },
+  "legal-review": {
+    "description": "Candidate material for qualified legal review",
+    "modules": ["legal"],
+    "requires": ["privilege_review", "privacy_review", "human_approval"]
+  }
+}

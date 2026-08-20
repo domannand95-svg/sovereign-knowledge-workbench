@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sovereign-knowledge-workbench"
+version = "0.1.0"
+description = "Local-first evidence intake and governed workflow orchestration"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+pdf = ["pypdf>=5,<7"]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+skw = "sovereign_workbench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
