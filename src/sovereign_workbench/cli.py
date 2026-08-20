@@ -79,13 +79,17 @@ def main(argv: list[str] | None = None) -> int:
             maximum = args.max_file_mb * 1024 * 1024
             with connect(args.state_db) as database:
                 admitted = 0
+                skipped_oversize = 0
                 for path in sorted(args.root.resolve(strict=True).rglob("*")):
                     if admitted >= args.limit or path.is_symlink() or not path.is_file() or path.suffix.casefold() not in suffixes:
+                        continue
+                    if path.stat().st_size > maximum:
+                        skipped_oversize += 1
                         continue
                     enqueue(database, args.plugin_id, path, hash_file(path, maximum), max_bytes=maximum)
                     admitted += 1
                 outcome = run_pending(database, limit=args.limit)
-                print(json.dumps({"admitted": admitted, **outcome, "status": status_counts(database)}, sort_keys=True))
+                print(json.dumps({"admitted": admitted, "skipped_oversize": skipped_oversize, **outcome, "status": status_counts(database)}, sort_keys=True))
             return 0
         if args.command == "plugin-run":
             print(json.dumps(
