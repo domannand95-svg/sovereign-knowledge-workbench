@@ -57,4 +57,7 @@ class WorkbenchReport:
     recipient_routes: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        for file_record in value["files"]:
+            file_record.pop("extracted_text", None)
+        return value

@@ -22,7 +22,13 @@ def _contained(root: Path, candidate: Path) -> bool:
         return False
 
 
-def scan_files(root: Path, *, max_file_bytes: int = 50 * 1024 * 1024) -> list[FileRecord]:
+def scan_files(
+    root: Path,
+    *,
+    max_file_bytes: int = 50 * 1024 * 1024,
+    include_suffixes: set[str] | None = None,
+    max_files: int | None = None,
+) -> list[FileRecord]:
     root = root.resolve(strict=True)
     if not root.is_dir():
         raise IntakeError("Intake root must be a directory")
@@ -31,6 +37,10 @@ def scan_files(root: Path, *, max_file_bytes: int = 50 * 1024 * 1024) -> list[Fi
     for path in sorted(root.rglob("*"), key=lambda value: value.as_posix().casefold()):
         if path.is_symlink() or not path.is_file() or not _contained(root, path):
             continue
+        if include_suffixes is not None and path.suffix.casefold() not in include_suffixes:
+            continue
+        if max_files is not None and len(records) >= max_files:
+            break
         stat = path.stat()
         if stat.st_size > max_file_bytes:
             records.append(FileRecord(

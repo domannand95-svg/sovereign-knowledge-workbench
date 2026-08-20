@@ -16,8 +16,15 @@ def analyze_workspace(
     routes_path: Path | None = None,
     use_local_model: bool = False,
     max_file_bytes: int = 50 * 1024 * 1024,
+    include_suffixes: set[str] | None = None,
+    max_files: int | None = None,
 ) -> WorkbenchReport:
-    records = scan_files(root, max_file_bytes=max_file_bytes)
+    records = scan_files(
+        root,
+        max_file_bytes=max_file_bytes,
+        include_suffixes=include_suffixes,
+        max_files=max_files,
+    )
     report = WorkbenchReport(
         contract_version="sovereign.workbench.report.v1",
         root=str(root.resolve()),

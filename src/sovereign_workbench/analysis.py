@@ -10,7 +10,7 @@ MODULE_RULES = {
     "research": ("research", "study", "methodology", "hypothesis", "literature"),
     "evidence": ("evidence", "finding", "dataset", "measurement", "result"),
     "correspondence": ("dear ", "regards", "email", "recipient", "subject:"),
-    "finance": ("invoice", "budget", "payment", "financial", "receipt"),
+    "finance": ("invoice", "payment", "financial statement", "purchase receipt"),
     "legal": ("legal", "contract", "agreement", "liability", "confidential"),
 }
 
@@ -22,8 +22,8 @@ SENSITIVE_PATTERNS = {
 }
 
 RESEARCH_CUES = (
-    "further research", "citation needed", "verify", "unknown", "uncertain",
-    "to be confirmed", "tbc", "research required", "open question",
+    "further research", "citation needed", "verify source", "verify claim",
+    "to be confirmed", "research required", "open question",
 )
 
 
@@ -55,6 +55,8 @@ def privacy_findings(record: FileRecord) -> list[Finding]:
 
 
 def research_gaps(record: FileRecord) -> list[dict[str, str]]:
+    if not record.relative_path.casefold().endswith((".md", ".txt", ".rst", ".html", ".htm")):
+        return []
     text = record.extracted_text or ""
     queue = []
     for line_number, line in enumerate(text.splitlines(), start=1):

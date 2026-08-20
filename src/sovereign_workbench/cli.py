@@ -19,6 +19,8 @@ def parser() -> argparse.ArgumentParser:
     scan.add_argument("--routes", type=Path)
     scan.add_argument("--local-model", action="store_true")
     scan.add_argument("--max-file-mb", type=int, default=50)
+    scan.add_argument("--max-files", type=int)
+    scan.add_argument("--include", nargs="+", metavar="SUFFIX", help="Only scan suffixes such as .md .txt .pdf")
     scan.add_argument("--output", type=Path)
     scan.add_argument("--authorize-output", action="store_true", help="Request a Sovereign grant before writing output")
 
@@ -41,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
             routes_path=args.routes,
             use_local_model=args.local_model,
             max_file_bytes=args.max_file_mb * 1024 * 1024,
+            include_suffixes={value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include} if args.include else None,
+            max_files=args.max_files,
         )
         package = build_review_package(report)
         if args.output:

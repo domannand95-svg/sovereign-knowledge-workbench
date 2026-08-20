@@ -5,6 +5,17 @@ extracting, reviewing, researching, and packaging personal knowledge files. It
 coordinates probabilistic local models without giving them authority over the
 filesystem or external recipients.
 
+## Related repositories
+
+- [Sovereign OS](https://github.com/domannand95-svg/sovereign-os) provides the
+  deterministic identity, policy, capability, execution, and replay boundary.
+- [Knowledge Infrastructure Bootstrap Kit](https://github.com/domannand95-svg/knowledge-infrastructure-bootstrap-kit)
+  provides deterministic validation, normalization evidence, and provenance.
+
+This repository is the orchestration and review layer between local files,
+local models, BKI validation, and Sovereign authorization. It does not replace
+either repository or acquire their authority.
+
 ## Responsibility boundary
 
 | System | Responsibility |
@@ -52,6 +63,18 @@ Read-only deterministic analysis to standard output:
 .\.venv\Scripts\skw.exe scan C:\path\to\your\files `
   --routes config\routes.example.json
 ```
+
+For a laptop-safe pilot over selected formats:
+
+```powershell
+.\.venv\Scripts\skw.exe scan C:\path\to\your\files `
+  --include .md .txt .pdf `
+  --max-files 25 `
+  --max-file-mb 20
+```
+
+Review packages contain paths, hashes, classifications, findings, and proposals;
+they deliberately exclude extracted source text.
 
 Use an OpenAI-compatible local model such as Ollama:
 
