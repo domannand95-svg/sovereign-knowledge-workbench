@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from sovereign_workbench.scheduler import ModelWorker, SchedulerError, plan, run_schedule
+from sovereign_workbench.scheduler import (ModelWorker, SchedulerError, connect_schedule,
+    enqueue_schedule, plan, run_pending_schedule, run_schedule, schedule_counts)
 
 
 WORKERS = [
@@ -30,3 +31,23 @@ def test_schedule_isolates_failure_and_preserves_no_authority():
 def test_schedule_rejects_missing_role():
     with pytest.raises(SchedulerError, match="No worker"):
         plan([{"task_id": "1", "role": "write", "prompt": "x"}], WORKERS)
+
+
+def test_schedule_rejects_duplicate_task_identity():
+    with pytest.raises(SchedulerError, match="Duplicate"):
+        plan([{"task_id":"1","role":"review","prompt":"a"},
+              {"task_id":"1","role":"review","prompt":"b"}], WORKERS)
+
+
+def test_durable_schedule_recovers_and_rejects_identity_reuse(tmp_path):
+    tasks = [{"task_id":"1","role":"review","prompt":"one"}]
+    with connect_schedule(tmp_path / "models.db") as database:
+        assert enqueue_schedule(database, tasks, WORKERS) == 1
+        database.execute("UPDATE model_jobs SET status='running'"); database.commit()
+        result = run_pending_schedule(database, max_concurrency=1,
+            invoke=lambda task, worker: {"task_id":task["task_id"], "worker_id":worker.worker_id,
+                "model":worker.model, "status":"candidate", "authority":"none", "proposal":{}})
+        assert result == {"completed":1,"failed":0}
+        assert schedule_counts(database)["completed"] == 1
+        with pytest.raises(SchedulerError, match="different content"):
+            enqueue_schedule(database, [{"task_id":"1","role":"review","prompt":"changed"}], WORKERS)

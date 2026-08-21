@@ -133,11 +133,15 @@ Several models can run through a deterministic, concurrency-bounded schedule:
 ```powershell
 .\.venv\Scripts\skw.exe models-run `
   --config config\models.ollama.example.json `
-  --tasks workbench-output\model-tasks.json
+  --tasks workbench-output\model-tasks.json `
+  --state-db workbench-output\model-jobs.db
 ```
 
 Workers are selected by role and round robin. Failures are isolated and every
-accepted result remains a `candidate` with `authority: none`.
+accepted result remains a `candidate` with `authority: none`. Durable mode
+recovers interrupted jobs, rejects reuse of a task identity with changed
+content, and bounds task count, prompt bytes, response bytes, concurrency, and
+execution time.
 
 ## Authorization receipt verification
 

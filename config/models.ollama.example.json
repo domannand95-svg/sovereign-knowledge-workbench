@@ -8,6 +8,7 @@
       "roles": ["classify", "summarize"],
       "endpoint": "http://127.0.0.1:11434/v1/chat/completions",
       "timeout_seconds": 120
+      ,"max_response_bytes": 1048576
     },
     {
       "worker_id": "research-reviewer",
@@ -15,6 +16,7 @@
       "roles": ["research", "summarize"],
       "endpoint": "http://127.0.0.1:11434/v1/chat/completions",
       "timeout_seconds": 120
+      ,"max_response_bytes": 1048576
     }
   ]
 }

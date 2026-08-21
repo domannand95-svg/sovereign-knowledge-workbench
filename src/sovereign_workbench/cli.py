@@ -12,7 +12,7 @@ from .plugins import PluginRuntimeError, list_plugins, run_plugin
 from .jobs import connect, enqueue, failed_jobs, run_pending, status_counts
 from .roles import RolePolicyError, evaluate_tool_eligibility, load_role_policy
 from .reviews import admit_completed, decide, list_candidates, verify_decisions
-from .scheduler import load_workers, run_schedule
+from .scheduler import connect_schedule, enqueue_schedule, load_workers, run_pending_schedule, run_schedule, schedule_counts
 
 
 def parser() -> argparse.ArgumentParser:
@@ -72,6 +72,10 @@ def parser() -> argparse.ArgumentParser:
     models = commands.add_parser("models-run", help="Run bounded proposal-only local model tasks")
     models.add_argument("--config", required=True, type=Path)
     models.add_argument("--tasks", required=True, type=Path)
+    models.add_argument("--state-db", type=Path, help="Persist tasks and results for restart recovery")
+    models.add_argument("--limit", type=int, default=100)
+    model_status = commands.add_parser("models-status", help="Show durable local model job counts")
+    model_status.add_argument("--state-db", required=True, type=Path)
     return root
 
 
@@ -111,7 +115,17 @@ def main(argv: list[str] | None = None) -> int:
             tasks = json.loads(args.tasks.read_text(encoding="utf-8"))
             if not isinstance(tasks, list):
                 raise ValueError("Model tasks must be a JSON array")
-            print(json.dumps(run_schedule(tasks, workers, max_concurrency=concurrency), sort_keys=True))
+            if args.state_db:
+                with connect_schedule(args.state_db) as database:
+                    admitted = enqueue_schedule(database, tasks, workers)
+                    outcome = run_pending_schedule(database, max_concurrency=concurrency, limit=args.limit)
+                    print(json.dumps({"admitted": admitted, **outcome, "status": schedule_counts(database)}, sort_keys=True))
+            else:
+                print(json.dumps(run_schedule(tasks, workers, max_concurrency=concurrency), sort_keys=True))
+            return 0
+        if args.command == "models-status":
+            with connect_schedule(args.state_db) as database:
+                print(json.dumps(schedule_counts(database), sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file
