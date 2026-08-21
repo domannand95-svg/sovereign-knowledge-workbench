@@ -13,6 +13,9 @@ from .jobs import connect, enqueue, failed_jobs, run_pending, status_counts
 from .roles import RolePolicyError, evaluate_tool_eligibility, load_role_policy
 from .reviews import admit_completed, decide, list_candidates, verify_decisions
 from .scheduler import connect_schedule, enqueue_schedule, load_workers, run_pending_schedule, run_schedule, schedule_counts
+from .staging import (StagingError, build_plan as build_stage_plan, connect as connect_staging,
+                      execute as execute_stage, recover as recover_staging, rollback as rollback_stage,
+                      status_counts as staging_status_counts)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -76,6 +79,18 @@ def parser() -> argparse.ArgumentParser:
     models.add_argument("--limit", type=int, default=100)
     model_status = commands.add_parser("models-status", help="Show durable local model job counts")
     model_status.add_argument("--state-db", required=True, type=Path)
+    stage_plan = commands.add_parser("stage-plan", help="Create a non-authoritative immutable staging plan")
+    stage_plan.add_argument("source", type=Path); stage_plan.add_argument("--staging-root", required=True, type=Path)
+    stage_plan.add_argument("--max-file-mb", type=int, default=100)
+    stage_execute = commands.add_parser("stage-execute", help="Request authorization and copy into reversible staging")
+    stage_execute.add_argument("--plan", required=True, type=Path); stage_execute.add_argument("--state-db", required=True, type=Path)
+    stage_execute.add_argument("--max-file-mb", type=int, default=100)
+    stage_rollback = commands.add_parser("stage-rollback", help="Request separate authorization and remove a verified staged copy")
+    stage_rollback.add_argument("plan_id"); stage_rollback.add_argument("--state-db", required=True, type=Path)
+    stage_recover = commands.add_parser("stage-recover", help="Fail interrupted staging operations closed")
+    stage_recover.add_argument("--state-db", required=True, type=Path)
+    stage_status = commands.add_parser("stage-status", help="Show reversible staging journal counts")
+    stage_status.add_argument("--state-db", required=True, type=Path)
     return root
 
 
@@ -126,6 +141,35 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "models-status":
             with connect_schedule(args.state_db) as database:
                 print(json.dumps(schedule_counts(database), sort_keys=True))
+            return 0
+        if args.command == "stage-plan":
+            print(json.dumps(build_stage_plan(args.source, args.staging_root,
+                max_bytes=args.max_file_mb * 1024 * 1024), sort_keys=True))
+            return 0
+        if args.command == "stage-execute":
+            plan = json.loads(args.plan.read_text(encoding="utf-8"))
+            receipt = request_sovereign_authorization({"operation":"stage_copy",
+                "target":plan.get("staged_path"), "report_sha256":plan.get("plan_id")})
+            with connect_staging(args.state_db) as database:
+                print(json.dumps(execute_stage(database, plan, receipt,
+                    max_bytes=args.max_file_mb * 1024 * 1024), sort_keys=True))
+            return 0
+        if args.command == "stage-rollback":
+            with connect_staging(args.state_db) as database:
+                row = database.execute("SELECT rollback_json FROM staged_operations WHERE plan_id=?", (args.plan_id,)).fetchone()
+                if not row or not row[0]: raise StagingError("Unknown staged rollback manifest")
+                manifest = json.loads(row[0])
+                receipt = request_sovereign_authorization({"operation":"rollback_stage_copy",
+                    "target":manifest["staged_path"], "report_sha256":args.plan_id})
+                print(json.dumps(rollback_stage(database, args.plan_id, receipt), sort_keys=True))
+            return 0
+        if args.command == "stage-recover":
+            with connect_staging(args.state_db) as database:
+                print(json.dumps({"recovered":recover_staging(database), "status":staging_status_counts(database)}, sort_keys=True))
+            return 0
+        if args.command == "stage-status":
+            with connect_staging(args.state_db) as database:
+                print(json.dumps(staging_status_counts(database), sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file
@@ -180,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sys.stdout.buffer.write(canonical_json(package))
         return 0
-    except (AdapterError, PluginRuntimeError, RolePolicyError, OSError, ValueError) as exc:
+    except (AdapterError, PluginRuntimeError, RolePolicyError, StagingError, OSError, ValueError) as exc:
         print(f"workbench failed closed: {exc}", file=sys.stderr)
         return 3
 

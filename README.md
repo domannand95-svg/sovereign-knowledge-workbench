@@ -152,6 +152,27 @@ requester identity, capability request, nonce, issue time and expiry, and
 consumes every grant and nonce once using `SKW_GRANT_LEDGER`. An authorizer's
 self-reported verification flag is not trusted.
 
+## Reversible staging pilot
+
+The staging pilot copies a hash-bound source into a dedicated staging root. It
+does not move or delete the source. Planning is inert; execution and rollback
+require separate Sovereign receipts bound to their exact targets.
+
+```powershell
+.\.venv\Scripts\skw.exe stage-plan C:\pilot\copy\source.txt `
+  --staging-root C:\pilot\staging > workbench-output\stage-plan.json
+.\.venv\Scripts\skw.exe stage-execute `
+  --plan workbench-output\stage-plan.json `
+  --state-db workbench-output\staging.db
+.\.venv\Scripts\skw.exe stage-status --state-db workbench-output\staging.db
+```
+
+Every copy is re-hashed immediately before and after staging, journaled, and
+paired with a rollback manifest. Interrupted operations are inspected by
+`stage-recover` and either reconstructed from verified bytes or failed closed
+for explicit review and reauthorization. Use test fixtures and backed-up copies
+only; this pilot does not authorize Digital Archive mutation.
+
 ## BKI validation
 
 ```powershell
