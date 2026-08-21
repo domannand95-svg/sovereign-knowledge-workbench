@@ -11,7 +11,7 @@ from .pipeline import analyze_workspace
 from .plugins import PluginRuntimeError, list_plugins, run_plugin
 from .jobs import connect, enqueue, failed_jobs, run_pending, status_counts
 from .roles import RolePolicyError, evaluate_tool_eligibility, load_role_policy
-from .reviews import admit_completed, decide, list_candidates
+from .reviews import admit_completed, decide, list_candidates, verify_decisions
 from .scheduler import load_workers, run_schedule
 
 
@@ -67,6 +67,8 @@ def parser() -> argparse.ArgumentParser:
     review_decide.add_argument("--reviewer", required=True)
     review_decide.add_argument("--reason", required=True)
     review_decide.add_argument("--state-db", required=True, type=Path)
+    review_verify = commands.add_parser("reviews-verify", help="Verify the immutable review decision chains")
+    review_verify.add_argument("--state-db", required=True, type=Path)
     models = commands.add_parser("models-run", help="Run bounded proposal-only local model tasks")
     models.add_argument("--config", required=True, type=Path)
     models.add_argument("--tasks", required=True, type=Path)
@@ -99,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
             with connect(args.state_db) as database:
                 decision_id = decide(database, args.candidate_id, args.decision, args.reviewer, args.reason)
                 print(json.dumps({"decision_id": decision_id, "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "reviews-verify":
+            with connect(args.state_db) as database:
+                print(json.dumps(verify_decisions(database), sort_keys=True))
             return 0
         if args.command == "models-run":
             concurrency, workers = load_workers(args.config)

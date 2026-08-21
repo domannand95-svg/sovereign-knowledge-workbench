@@ -27,10 +27,27 @@ def install(database: sqlite3.Connection) -> None:
       decision TEXT NOT NULL CHECK(decision IN ('approved','rejected','needs_research','quarantined')),
       reviewer TEXT NOT NULL,
       reason TEXT NOT NULL,
-      decided_at TEXT NOT NULL
+      decided_at TEXT NOT NULL,
+      previous_decision_id TEXT,
+      decision_hash TEXT
     );
+    """)
+    columns = {row[1] for row in database.execute("PRAGMA table_info(review_decisions)")}
+    if "previous_decision_id" not in columns:
+        database.execute("ALTER TABLE review_decisions ADD COLUMN previous_decision_id TEXT")
+    if "decision_hash" not in columns:
+        database.execute("ALTER TABLE review_decisions ADD COLUMN decision_hash TEXT")
+    database.executescript("""
     CREATE INDEX IF NOT EXISTS review_decisions_candidate_idx
       ON review_decisions(candidate_id, decided_at);
+    CREATE TRIGGER IF NOT EXISTS review_candidates_no_update
+      BEFORE UPDATE ON review_candidates BEGIN SELECT RAISE(ABORT, 'review candidates are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS review_candidates_no_delete
+      BEFORE DELETE ON review_candidates BEGIN SELECT RAISE(ABORT, 'review candidates are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS review_decisions_no_update
+      BEFORE UPDATE ON review_decisions BEGIN SELECT RAISE(ABORT, 'review decisions are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS review_decisions_no_delete
+      BEFORE DELETE ON review_decisions BEGIN SELECT RAISE(ABORT, 'review decisions are immutable'); END;
     """)
     database.commit()
 
@@ -40,7 +57,8 @@ def admit_completed(database: sqlite3.Connection, *, limit: int = 100) -> int:
         raise ValueError("Review admission limit must be between 1 and 1000")
     install(database)
     rows = database.execute(
-        "SELECT job_id,result_json FROM jobs WHERE status='completed' AND result_json IS NOT NULL "
+        "SELECT j.job_id,j.result_json FROM jobs j WHERE j.status='completed' AND j.result_json IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM review_candidates c WHERE c.job_id=j.job_id) "
         "ORDER BY updated_at,job_id LIMIT ?", (limit,)
     ).fetchall()
     admitted = 0
@@ -94,12 +112,45 @@ def decide(database: sqlite3.Connection, candidate_id: str, decision: str, revie
     if hashlib.sha256(canonical.encode()).hexdigest() != expected_hash:
         raise ValueError("Review candidate result identity mismatch")
     decided_at = _now()
-    decision_id = hashlib.sha256(
-        f"{candidate_id}\0{decision}\0{reviewer.strip()}\0{reason.strip()}\0{decided_at}".encode()
-    ).hexdigest()
+    previous = database.execute(
+        "SELECT decision_id FROM review_decisions WHERE candidate_id=? ORDER BY decided_at DESC,decision_id DESC LIMIT 1",
+        (candidate_id,),
+    ).fetchone()
+    previous_decision_id = previous[0] if previous else ""
+    decision_id = _decision_hash(candidate_id, decision, reviewer.strip(), reason.strip(), decided_at, previous_decision_id)
     database.execute(
-        "INSERT INTO review_decisions(decision_id,candidate_id,decision,reviewer,reason,decided_at) VALUES(?,?,?,?,?,?)",
-        (decision_id, candidate_id, decision, reviewer.strip(), reason.strip(), decided_at),
+        "INSERT INTO review_decisions(decision_id,candidate_id,decision,reviewer,reason,decided_at,previous_decision_id,decision_hash) VALUES(?,?,?,?,?,?,?,?)",
+        (decision_id, candidate_id, decision, reviewer.strip(), reason.strip(), decided_at,
+         previous_decision_id or None, decision_id),
     )
     database.commit()
     return decision_id
+
+
+def _decision_hash(candidate_id: str, decision: str, reviewer: str, reason: str,
+                   decided_at: str, previous_decision_id: str) -> str:
+    digest = hashlib.sha256(b"SOVEREIGN_WORKBENCH_REVIEW_DECISION_V1")
+    for field in (candidate_id, decision, reviewer, reason, decided_at, previous_decision_id):
+        encoded = field.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def verify_decisions(database: sqlite3.Connection) -> dict[str, int | bool]:
+    install(database)
+    checked = 0
+    candidates = database.execute("SELECT candidate_id FROM review_candidates ORDER BY candidate_id").fetchall()
+    for (candidate_id,) in candidates:
+        previous = ""
+        rows = database.execute(
+            "SELECT decision_id,decision,reviewer,reason,decided_at,previous_decision_id,decision_hash "
+            "FROM review_decisions WHERE candidate_id=? ORDER BY decided_at,decision_id", (candidate_id,)
+        ).fetchall()
+        for decision_id, decision, reviewer, reason, decided_at, linked_previous, stored_hash in rows:
+            expected = _decision_hash(candidate_id, decision, reviewer, reason, decided_at, previous)
+            if linked_previous != (previous or None) or decision_id != expected or stored_hash != expected:
+                raise ValueError(f"Review decision chain verification failed for {candidate_id}")
+            previous = decision_id
+            checked += 1
+    return {"valid": True, "candidates": len(candidates), "decisions": checked}

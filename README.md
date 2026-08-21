@@ -171,11 +171,9 @@ $env:SKW_PYTHON = "C:\path\to\knowledge-infrastructure-bootstrap-kit\.venv\Scrip
 
 ## Deliberate next gates
 
-1. expose a stable Sovereign authorization/receipt command backed by the
-   capability registry;
-2. validate its signed grant and exact target binding in the workbench;
-3. add OCR adapters running in isolated local processes;
-4. add citation-resolution and source-quality modules;
-5. add recipient-specific disclosure policies and redaction review; and
-6. implement dispatch connectors only after separate capability consumption and
+1. back the local authorizer with the full capability registry and lifecycle;
+2. add OCR adapters running in isolated local processes;
+3. add citation-resolution and source-quality modules;
+4. add recipient-specific disclosure policies and redaction review; and
+5. implement dispatch connectors only after separate capability consumption and
    explicit human confirmation for each destination.
