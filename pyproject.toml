@@ -7,7 +7,7 @@ name = "sovereign-knowledge-workbench"
 version = "0.1.0"
 description = "Local-first evidence intake and governed workflow orchestration"
 requires-python = ">=3.11"
-dependencies = ["cryptography>=43,<47"]
+dependencies = ["cryptography>=43,<51"]
 
 [project.optional-dependencies]
 pdf = ["pypdf>=5,<7"]
