@@ -1,0 +1,44 @@
+name: Security and SBOM
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -e ".[pdf,plugins]" pip-audit cyclonedx-bom
+      - name: Audit installed dependencies
+        run: python -m pip_audit
+      - name: Generate CycloneDX SBOM
+        run: cyclonedx-py environment --output-file workbench.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workbench-sbom
+          path: workbench.cdx.json
+          if-no-files-found: error
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: python
+      - uses: github/codeql-action/analyze@v3
+
