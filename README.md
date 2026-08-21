@@ -145,10 +145,11 @@ execution time.
 
 ## Authorization receipt verification
 
-Effectful boundaries require `sovereign.authorization.receipt.v2`. The
+Effectful boundaries require `sovereign.authorization.receipt.v3`. The
 Workbench independently verifies its Ed25519 signature against the pinned
-`SKW_SOVEREIGN_VERIFYING_KEY`, checks the exact proposal digest, operation and
-target, and consumes each grant once using `SKW_GRANT_LEDGER`. An authorizer's
+`SKW_SOVEREIGN_VERIFYING_KEY`, checks the exact proposal, operation, target,
+requester identity, capability request, nonce, issue time and expiry, and
+consumes every grant and nonce once using `SKW_GRANT_LEDGER`. An authorizer's
 self-reported verification flag is not trusted.
 
 ## BKI validation
