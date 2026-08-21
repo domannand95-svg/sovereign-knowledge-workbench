@@ -173,6 +173,27 @@ paired with a rollback manifest. Interrupted operations are inspected by
 for explicit review and reauthorization. Use test fixtures and backed-up copies
 only; this pilot does not authorize Digital Archive mutation.
 
+## Local companion for the Base44 interface
+
+The companion exposes review status and inert staging-plan previews to a local
+browser. It binds only to `127.0.0.1`, requires a fresh bearer token, and permits
+only explicitly listed browser origins. The token is printed when the process
+starts and is never stored in the repository.
+
+```powershell
+.\scripts\start-companion.ps1 `
+  -StateDb .\workbench-output\state.db `
+  -StagingDb .\workbench-output\staging.db `
+  -AllowOrigin http://localhost:5173
+```
+
+Planning has no authority. Execution and rollback endpoints accept an empty
+request body only: they obtain and independently verify a separate Sovereign
+receipt inside the local process. A browser-supplied receipt is rejected. Run
+`.\scripts\install-companion-launcher.ps1` to add a desktop launcher using the
+same localhost-only defaults; edit its arguments before use if your database or
+Base44 development origin differs.
+
 ## BKI validation
 
 ```powershell
