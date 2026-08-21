@@ -85,6 +85,18 @@ Resumable role-bounded batch processing:
 Role eligibility permits a tool request; it is not an execution capability.
 Effectful plugins will additionally require a one-time Sovereign grant.
 
+Completed results enter an append-only human review ledger:
+
+```powershell
+.\.venv\Scripts\skw.exe reviews-admit --state-db workbench-output\jobs.db
+.\.venv\Scripts\skw.exe reviews-list --state-db workbench-output\jobs.db
+.\.venv\Scripts\skw.exe reviews-decide CANDIDATE_ID needs_research `
+  --reviewer operator --reason "Primary citation required" `
+  --state-db workbench-output\jobs.db
+```
+
+A review approval is not filesystem, disclosure, or dispatch authorization.
+
 Read-only deterministic analysis to standard output:
 
 ```powershell
@@ -115,6 +127,25 @@ $env:SKW_MODEL_NAME = "qwen2.5-coder:7b"
 The model sees bounded extracted text and returns classification JSON. It does
 not receive filesystem handles, policy keys, a capability registry, recipient
 credentials, or dispatch tools.
+
+Several models can run through a deterministic, concurrency-bounded schedule:
+
+```powershell
+.\.venv\Scripts\skw.exe models-run `
+  --config config\models.ollama.example.json `
+  --tasks workbench-output\model-tasks.json
+```
+
+Workers are selected by role and round robin. Failures are isolated and every
+accepted result remains a `candidate` with `authority: none`.
+
+## Authorization receipt verification
+
+Effectful boundaries require `sovereign.authorization.receipt.v2`. The
+Workbench independently verifies its Ed25519 signature against the pinned
+`SKW_SOVEREIGN_VERIFYING_KEY`, checks the exact proposal digest, operation and
+target, and consumes each grant once using `SKW_GRANT_LEDGER`. An authorizer's
+self-reported verification flag is not trusted.
 
 ## BKI validation
 

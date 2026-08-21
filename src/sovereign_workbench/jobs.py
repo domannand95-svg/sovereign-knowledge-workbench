@@ -39,6 +39,8 @@ def connect(path: Path) -> sqlite3.Connection:
     if "max_bytes" not in columns:
         database.execute("ALTER TABLE jobs ADD COLUMN max_bytes INTEGER NOT NULL DEFAULT 104857600")
     database.execute("PRAGMA journal_mode=WAL")
+    from .reviews import install
+    install(database)
     return database
 
 

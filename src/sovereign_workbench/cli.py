@@ -11,6 +11,8 @@ from .pipeline import analyze_workspace
 from .plugins import PluginRuntimeError, list_plugins, run_plugin
 from .jobs import connect, enqueue, failed_jobs, run_pending, status_counts
 from .roles import RolePolicyError, evaluate_tool_eligibility, load_role_policy
+from .reviews import admit_completed, decide, list_candidates
+from .scheduler import load_workers, run_schedule
 
 
 def parser() -> argparse.ArgumentParser:
@@ -53,6 +55,21 @@ def parser() -> argparse.ArgumentParser:
     failures = commands.add_parser("jobs-failures", help="Show bounded durable plugin failures")
     failures.add_argument("--state-db", required=True, type=Path)
     failures.add_argument("--limit", type=int, default=25)
+    review_admit = commands.add_parser("reviews-admit", help="Admit completed candidates to human review")
+    review_admit.add_argument("--state-db", required=True, type=Path)
+    review_admit.add_argument("--limit", type=int, default=100)
+    review_list = commands.add_parser("reviews-list", help="List candidates and their latest decision")
+    review_list.add_argument("--state-db", required=True, type=Path)
+    review_list.add_argument("--limit", type=int, default=100)
+    review_decide = commands.add_parser("reviews-decide", help="Append a non-executing human review decision")
+    review_decide.add_argument("candidate_id")
+    review_decide.add_argument("decision", choices=["approved", "rejected", "needs_research", "quarantined"])
+    review_decide.add_argument("--reviewer", required=True)
+    review_decide.add_argument("--reason", required=True)
+    review_decide.add_argument("--state-db", required=True, type=Path)
+    models = commands.add_parser("models-run", help="Run bounded proposal-only local model tasks")
+    models.add_argument("--config", required=True, type=Path)
+    models.add_argument("--tasks", required=True, type=Path)
     return root
 
 
@@ -69,6 +86,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "jobs-failures":
             with connect(args.state_db) as database:
                 print(json.dumps(failed_jobs(database, limit=args.limit), sort_keys=True))
+            return 0
+        if args.command == "reviews-admit":
+            with connect(args.state_db) as database:
+                print(json.dumps({"admitted": admit_completed(database, limit=args.limit)}, sort_keys=True))
+            return 0
+        if args.command == "reviews-list":
+            with connect(args.state_db) as database:
+                print(json.dumps(list_candidates(database, limit=args.limit), sort_keys=True))
+            return 0
+        if args.command == "reviews-decide":
+            with connect(args.state_db) as database:
+                decision_id = decide(database, args.candidate_id, args.decision, args.reviewer, args.reason)
+                print(json.dumps({"decision_id": decision_id, "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "models-run":
+            concurrency, workers = load_workers(args.config)
+            tasks = json.loads(args.tasks.read_text(encoding="utf-8"))
+            if not isinstance(tasks, list):
+                raise ValueError("Model tasks must be a JSON array")
+            print(json.dumps(run_schedule(tasks, workers, max_concurrency=concurrency), sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file

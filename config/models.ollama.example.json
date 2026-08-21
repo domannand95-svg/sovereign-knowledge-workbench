@@ -1,0 +1,20 @@
+{
+  "contract_version": "sovereign.workbench.models.v1",
+  "max_concurrency": 2,
+  "workers": [
+    {
+      "worker_id": "archive-reviewer",
+      "model": "qwen2.5:7b",
+      "roles": ["classify", "summarize"],
+      "endpoint": "http://127.0.0.1:11434/v1/chat/completions",
+      "timeout_seconds": 120
+    },
+    {
+      "worker_id": "research-reviewer",
+      "model": "qwen2.5-coder:7b",
+      "roles": ["research", "summarize"],
+      "endpoint": "http://127.0.0.1:11434/v1/chat/completions",
+      "timeout_seconds": 120
+    }
+  ]
+}
