@@ -43,6 +43,23 @@ def test_plan_tampering_and_interrupted_recovery_fail_closed(tmp_path: Path):
         assert database.execute("SELECT status FROM staged_operations").fetchone()[0] == "failed"
 
 
+def test_interrupted_partial_copy_is_never_promoted(tmp_path: Path):
+    source = tmp_path / "source.txt"; source.write_text("complete-source", encoding="utf-8")
+    root = tmp_path / "stage"; root.mkdir(); plan = build_plan(source, root)
+    target = Path(plan["staged_path"]); target.parent.mkdir()
+    partial = target.with_suffix(target.suffix + ".partial")
+    partial.write_text("truncated", encoding="utf-8")
+    with connect(tmp_path / "journal.db") as database:
+        database.execute("INSERT INTO staged_operations(plan_id,plan_json,status) VALUES(?,?,?)",
+                         (plan["plan_id"], json.dumps(plan, sort_keys=True, separators=(",", ":")), "staging"))
+        database.commit(); assert recover(database) == 1
+        row = database.execute("SELECT status,error FROM staged_operations").fetchone()
+    assert row[0] == "failed" and "reauthorization" in row[1]
+    assert not target.exists()
+    assert partial.read_text(encoding="utf-8") == "truncated"
+    assert source.read_text(encoding="utf-8") == "complete-source"
+
+
 def test_rollback_requires_separate_binding_and_preserves_source(tmp_path: Path):
     source = tmp_path / "source.txt"; source.write_text("original", encoding="utf-8")
     root = tmp_path / "stage"; root.mkdir(); plan = build_plan(source, root)

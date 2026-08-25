@@ -16,6 +16,7 @@ plugins = ["sovereign-workbench-plugins @ git+https://github.com/domannand95-svg
 
 [project.scripts]
 skw = "sovereign_workbench.cli:main"
+skw-companion = "sovereign_workbench.companion:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
