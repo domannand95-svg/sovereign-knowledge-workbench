@@ -220,6 +220,38 @@ def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path)
         assert train_ids.isdisjoint(eval_ids)
 
 
+def test_training_split_uses_latest_decision_without_source_leakage(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 20)
+    review = tmp_path / "review.csv"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database, limit=20)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        for row in rows:
+            row.update({"decision": "APPROVE", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "LOW",
+                        "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
+                        "review_note": "Initial review", "reviewer": "Dominic"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        assert import_review_csv(database, review) == 20
+        rows[0]["review_note"] = "Corrected review"
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        assert import_review_csv(database, review) == 1
+
+        result = export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
+        assert result["train_examples"] + result["evaluation_examples"] == 20
+        examples = []
+        for path in (tmp_path / "train.jsonl", tmp_path / "eval.jsonl"):
+            examples.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+        assert len({example["source_id"] for example in examples}) == 20
+        corrected = [example for example in examples if example["source_id"] == rows[0]["source_id"]]
+        assert len(corrected) == 1
+        assert corrected[0]["expected"]["review_note"] == "Corrected review"
+
+
 def test_formatted_excel_export_is_valid_and_non_overwriting(tmp_path: Path):
     source = tmp_path / "source"; source.mkdir(); make_files(source, 2)
     output = tmp_path / "review.xlsx"

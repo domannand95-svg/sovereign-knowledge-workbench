@@ -605,17 +605,21 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
     if train.exists() or evaluation.exists():
         raise ValueError("Training or evaluation export already exists")
     rows = database.execute(
+        "WITH ranked_decisions AS ("
+        "SELECT d.*,ROW_NUMBER() OVER (PARTITION BY d.source_id "
+        "ORDER BY d.decided_at DESC,d.decision_id DESC) AS decision_rank "
+        "FROM archive_review_decisions d) "
         "SELECT d.decision_id,d.source_id,d.decision,d.topic,d.maturity,d.authority,d.confidence,"
         "d.privacy_status,d.canonical_status,d.review_note,d.research_question,"
         "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
         "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,'') "
-        "FROM archive_review_decisions d LEFT JOIN archive_review_candidates c ON c.source_id=d.source_id "
-        "ORDER BY d.decision_id"
+        "FROM ranked_decisions d LEFT JOIN archive_review_candidates c ON c.source_id=d.source_id "
+        "WHERE d.decision_rank=1 ORDER BY d.source_id"
     ).fetchall()
     if len(rows) < 5:
         raise ValueError("At least five reviewed examples are required for a split")
     train_rows, eval_rows = [], []
-    for index, row in enumerate(sorted(rows, key=lambda value: value[1])):
+    for row in rows:
         (decision_id, source_id, decision, topic, maturity, authority, confidence, privacy,
          canonical, note, question, summary, proposed_topic, proposed_maturity,
          proposed_authority, reason) = row
@@ -628,7 +632,8 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
                                 "authority": authority, "confidence": confidence,
                                 "privacy_status": privacy, "canonical_status": canonical,
                                 "review_note": note, "research_question": question}}
-        (eval_rows if index % 5 == 0 else train_rows).append(example)
+        bucket = int(hashlib.sha256(source_id.encode()).hexdigest()[:8], 16) % 5
+        (eval_rows if bucket == 0 else train_rows).append(example)
     if not train_rows or not eval_rows:
         raise ValueError("Deterministic split requires examples spanning both hash buckets")
     for path, values in ((train, train_rows), (evaluation, eval_rows)):
