@@ -97,6 +97,21 @@ Completed results enter an append-only human review ledger:
 
 A review approval is not filesystem, disclosure, or dispatch authorization.
 
+For a simpler one-file-at-a-time Windows review screen:
+
+```powershell
+.\scripts\start-local-review.ps1 `
+  -StateDb .\workbench-output\archive-review.db `
+  -Reviewer "Dominic Annand"
+```
+
+The screen shows the bounded summary and deterministic review reason, then
+offers large **APPROVE**, **RESEARCH**, **QUARANTINE**, and **REJECT** choices.
+It re-hashes the exact source immediately before accepting a decision,
+automatically records the named human reviewer, and proposes an editable
+research question when needed. It has no file movement, deletion, staging,
+publication, dispatch, canonical-promotion, or training capability.
+
 Read-only deterministic analysis to standard output:
 
 ```powershell

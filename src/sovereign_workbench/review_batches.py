@@ -523,40 +523,60 @@ def import_review_csv(database: sqlite3.Connection, path: Path) -> int:
     database.execute("BEGIN IMMEDIATE")
     try:
         for row in rows:
-            bound = database.execute(
-                "SELECT s.source_sha256 FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
-                "WHERE i.batch_id=? AND i.source_id=?", (row["batch_id"], row["source_id"]),
-            ).fetchone()
-            if not bound or bound[0] != row["source_sha256"]:
-                raise ValueError("Review row source identity mismatch")
+            _validate_review_source_identity(database, row)
             if not row["decision"].strip():
                 continue
-            if row["decision"] not in DECISIONS or row["topic"] not in TOPICS or row["maturity"] not in MATURITIES or row["authority"] not in AUTHORITIES:
-                raise ValueError("Review row contains an invalid controlled value")
-            if row["confidence"] not in {"HIGH", "MEDIUM", "LOW", "UNKNOWN"}:
-                raise ValueError("Review confidence is invalid")
-            if not row["reviewer"].strip() or not row["review_note"].strip():
-                raise ValueError("Reviewer and review_note are required")
-            if row["decision"] == "NEEDS_RESEARCH" and not row["research_question"].strip():
-                raise ValueError("NEEDS_RESEARCH requires a research question")
-            canonical = json.dumps({key: row[key] for key in REVIEW_COLUMNS}, sort_keys=True, separators=(",", ":"))
-            decision_id = hashlib.sha256(("SOVEREIGN_WORKBENCH_ARCHIVE_REVIEW_V1\0" + canonical).encode()).hexdigest()
-            cursor = database.execute(
-                "INSERT OR IGNORE INTO archive_review_decisions("
-                "decision_id,source_id,batch_id,decision,topic,maturity,authority,confidence,privacy_status,"
-                "canonical_status,review_note,supersedes,replaced_by,research_question,reviewer,decided_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (decision_id, row["source_id"], row["batch_id"], row["decision"], row["topic"],
-                 row["maturity"], row["authority"], row["confidence"], row["privacy_status"],
-                 row["canonical_status"], row["review_note"], row["supersedes"], row["replaced_by"],
-                 row["research_question"], row["reviewer"].strip(), _now()),
-            )
-            imported += cursor.rowcount
+            imported += record_review_decision(database, row, commit=False)
         database.commit()
         return imported
     except Exception:
         database.rollback()
         raise
+
+
+def _validate_review_source_identity(database: sqlite3.Connection,
+                                     row: dict[str, str]) -> None:
+    bound = database.execute(
+        "SELECT s.source_sha256 FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
+        "WHERE i.batch_id=? AND i.source_id=?", (row["batch_id"], row["source_id"]),
+    ).fetchone()
+    if not bound or bound[0] != row["source_sha256"]:
+        raise ValueError("Review row source identity mismatch")
+
+
+def record_review_decision(database: sqlite3.Connection, row: dict[str, str], *,
+                           commit: bool = True) -> int:
+    """Append one non-executing, hash-bound human decision to the frozen ledger."""
+    if set(row) != set(REVIEW_COLUMNS):
+        raise ValueError("Review decision fields do not match the frozen contract")
+    _validate_review_source_identity(database, row)
+    if (row["decision"] not in DECISIONS or row["topic"] not in TOPICS
+            or row["maturity"] not in MATURITIES or row["authority"] not in AUTHORITIES):
+        raise ValueError("Review row contains an invalid controlled value")
+    if row["confidence"] not in {"HIGH", "MEDIUM", "LOW", "UNKNOWN"}:
+        raise ValueError("Review confidence is invalid")
+    if not row["reviewer"].strip() or not row["review_note"].strip():
+        raise ValueError("Reviewer and review_note are required")
+    if row["decision"] == "NEEDS_RESEARCH" and not row["research_question"].strip():
+        raise ValueError("NEEDS_RESEARCH requires a research question")
+    canonical = json.dumps({key: row[key] for key in REVIEW_COLUMNS},
+                           sort_keys=True, separators=(",", ":"))
+    decision_id = hashlib.sha256(
+        ("SOVEREIGN_WORKBENCH_ARCHIVE_REVIEW_V1\0" + canonical).encode()
+    ).hexdigest()
+    cursor = database.execute(
+        "INSERT OR IGNORE INTO archive_review_decisions("
+        "decision_id,source_id,batch_id,decision,topic,maturity,authority,confidence,privacy_status,"
+        "canonical_status,review_note,supersedes,replaced_by,research_question,reviewer,decided_at"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (decision_id, row["source_id"], row["batch_id"], row["decision"], row["topic"],
+         row["maturity"], row["authority"], row["confidence"], row["privacy_status"],
+         row["canonical_status"], row["review_note"], row["supersedes"], row["replaced_by"],
+         row["research_question"], row["reviewer"].strip(), _now()),
+    )
+    if commit:
+        database.commit()
+    return cursor.rowcount
 
 
 def export_research_tickets(database: sqlite3.Connection, output: Path) -> int:
