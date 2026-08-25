@@ -244,22 +244,27 @@ def main(argv: list[str] | None = None) -> int:
                 candidate_count = 0
                 if batch:
                     taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
+                    local_model_config = LocalModelConfig.from_environment() if args.local_model else None
                     by_path = {record.relative_path: record for record in records}
                     candidates = []
                     for item in batch["items"]:
                         record = by_path[item["relative_path"]]
                         classification = classify(record, taxonomy)
-                        if args.local_model and record.extracted_text:
+                        if local_model_config and record.extracted_text:
                             classification = classify_with_local_model(
-                                record, LocalModelConfig.from_environment(),
+                                record, local_model_config,
                                 allowed_modules=[*taxonomy.modules, taxonomy.fallback_module] if taxonomy else None)
                         epistemic = assess(record)
+                        provenance = classification.source
+                        if local_model_config:
+                            provenance += (f"; model={local_model_config.model}; "
+                                           f"max_content_chars={local_model_config.max_content_chars}")
                         candidates.append({"source_id": item["source_id"],
                             "model_summary": classification.summary,
                             "proposed_topic": classification.module,
                             "proposed_maturity": epistemic.maturity,
                             "proposed_authority": epistemic.authority_status,
-                            "proposal_reason": f"{classification.source}; {epistemic.reason}",
+                            "proposal_reason": f"{provenance}; {epistemic.reason}",
                             "classification_confidence": classification.confidence,
                             "classification_abstained": classification.module in {
                                 taxonomy.fallback_module if taxonomy else "unclassified"

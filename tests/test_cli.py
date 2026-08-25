@@ -2,8 +2,11 @@ from pathlib import Path
 
 import hashlib
 import json
+import sqlite3
+from unittest.mock import patch
 
 from sovereign_workbench.cli import main
+from sovereign_workbench.model import Classification
 
 
 def test_stdout_scan_is_read_only(tmp_path: Path, capsys):
@@ -89,3 +92,22 @@ def test_archive_selection_manifest_rejects_hash_mismatch(tmp_path: Path, capsys
     assert main(["archive-batch-create", str(source), "--state-db", str(tmp_path / "review.db"),
                  "--include", ".txt", "--selection-manifest", str(manifest)]) == 3
     assert "identity mismatch" in capsys.readouterr().err
+
+
+def test_archive_local_model_candidate_binds_runtime_provenance(tmp_path: Path, monkeypatch, capsys):
+    source = tmp_path / "source"; source.mkdir()
+    (source / "selected.txt").write_text("research hypothesis", encoding="utf-8")
+    state = tmp_path / "review.db"
+    monkeypatch.setenv("SKW_MODEL_NAME", "test-model")
+    monkeypatch.setenv("SKW_MODEL_MAX_CHARS", "4321")
+    with patch("sovereign_workbench.cli.classify_with_local_model") as model:
+        model.return_value = Classification("research", 0.9, (), "bounded", "local_model_candidate")
+        assert main(["archive-batch-create", str(source), "--state-db", str(state),
+                     "--include", ".txt", "--local-model"]) == 0
+    capsys.readouterr()
+    with sqlite3.connect(state) as database:
+        reason = database.execute(
+            "SELECT proposal_reason FROM archive_review_candidates"
+        ).fetchone()[0]
+    assert "model=test-model" in reason
+    assert "max_content_chars=4321" in reason
