@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,6 +38,24 @@ CREATE TABLE IF NOT EXISTS review_batch_items (
   source_id TEXT NOT NULL UNIQUE REFERENCES review_sources(source_id),
   PRIMARY KEY(batch_id, ordinal)
 );
+CREATE TABLE IF NOT EXISTS archive_review_decisions (
+  decision_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  batch_id TEXT NOT NULL REFERENCES review_batches(batch_id),
+  decision TEXT NOT NULL CHECK(decision IN ('APPROVE','REJECT','NEEDS_RESEARCH','QUARANTINE')),
+  topic TEXT NOT NULL,
+  maturity TEXT NOT NULL,
+  authority TEXT NOT NULL,
+  confidence TEXT NOT NULL CHECK(confidence IN ('HIGH','MEDIUM','LOW','UNKNOWN')),
+  privacy_status TEXT NOT NULL,
+  canonical_status TEXT NOT NULL,
+  review_note TEXT NOT NULL,
+  supersedes TEXT NOT NULL,
+  replaced_by TEXT NOT NULL,
+  research_question TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  decided_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS review_batches_no_update
   BEFORE UPDATE ON review_batches BEGIN SELECT RAISE(ABORT, 'review batches are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batches_no_delete
@@ -45,7 +64,22 @@ CREATE TRIGGER IF NOT EXISTS review_batch_items_no_update
   BEFORE UPDATE ON review_batch_items BEGIN SELECT RAISE(ABORT, 'review batch items are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batch_items_no_delete
   BEFORE DELETE ON review_batch_items BEGIN SELECT RAISE(ABORT, 'review batch items are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_review_decisions_no_update
+  BEFORE UPDATE ON archive_review_decisions BEGIN SELECT RAISE(ABORT, 'archive review decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_review_decisions_no_delete
+  BEFORE DELETE ON archive_review_decisions BEGIN SELECT RAISE(ABORT, 'archive review decisions are immutable'); END;
 """
+
+TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
+MATURITIES = {"Production", "Normative specification", "Proposed specification", "Research", "Evidence", "Handover", "Archive", "Needs review"}
+AUTHORITIES = {"Implemented authority boundary", "Non-authoritative candidate", "No authority", "Needs review"}
+DECISIONS = {"APPROVE", "REJECT", "NEEDS_RESEARCH", "QUARANTINE"}
+REVIEW_COLUMNS = (
+    "batch_id", "source_id", "source_path", "source_sha256", "modified_ns", "extraction_status",
+    "model_summary", "proposed_topic", "proposed_maturity", "proposed_authority", "proposal_reason",
+    "decision", "topic", "maturity", "authority", "confidence", "privacy_status",
+    "canonical_status", "review_note", "supersedes", "replaced_by", "research_question", "reviewer",
+)
 
 
 def _now() -> str:
@@ -132,3 +166,73 @@ def counts(database: sqlite3.Connection) -> dict[str, int]:
         result[state] = count
     result["batches"] = database.execute("SELECT COUNT(*) FROM review_batches").fetchone()[0]
     return result
+
+
+def export_review_csv(database: sqlite3.Connection, batch_id: str, output: Path) -> Path:
+    if output.exists():
+        raise ValueError("Review export already exists; prior exports are never overwritten")
+    rows = database.execute(
+        "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status "
+        "FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
+        "WHERE i.batch_id=? ORDER BY i.ordinal", (batch_id,),
+    ).fetchall()
+    if not rows:
+        raise ValueError("Unknown or empty review batch")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=REVIEW_COLUMNS)
+        writer.writeheader()
+        for source_id, path, digest, modified_ns, extraction_status in rows:
+            value = {column: "" for column in REVIEW_COLUMNS}
+            value.update({"batch_id": batch_id, "source_id": source_id, "source_path": path,
+                          "source_sha256": digest, "modified_ns": modified_ns,
+                          "extraction_status": extraction_status, "decision": "NEEDS_RESEARCH",
+                          "topic": "Needs review", "maturity": "Needs review",
+                          "authority": "Needs review", "confidence": "UNKNOWN",
+                          "privacy_status": "Needs review", "canonical_status": "UNRESOLVED"})
+            writer.writerow(value)
+    return output
+
+
+def import_review_csv(database: sqlite3.Connection, path: Path) -> int:
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if tuple(reader.fieldnames or ()) != REVIEW_COLUMNS:
+            raise ValueError("Review CSV columns do not match the frozen contract")
+        rows = list(reader)
+    imported = 0
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        for row in rows:
+            if row["decision"] not in DECISIONS or row["topic"] not in TOPICS or row["maturity"] not in MATURITIES or row["authority"] not in AUTHORITIES:
+                raise ValueError("Review row contains an invalid controlled value")
+            if row["confidence"] not in {"HIGH", "MEDIUM", "LOW", "UNKNOWN"}:
+                raise ValueError("Review confidence is invalid")
+            if not row["reviewer"].strip() or not row["review_note"].strip():
+                raise ValueError("Reviewer and review_note are required")
+            if row["decision"] == "NEEDS_RESEARCH" and not row["research_question"].strip():
+                raise ValueError("NEEDS_RESEARCH requires a research question")
+            bound = database.execute(
+                "SELECT s.source_sha256 FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
+                "WHERE i.batch_id=? AND i.source_id=?", (row["batch_id"], row["source_id"]),
+            ).fetchone()
+            if not bound or bound[0] != row["source_sha256"]:
+                raise ValueError("Review row source identity mismatch")
+            canonical = json.dumps({key: row[key] for key in REVIEW_COLUMNS}, sort_keys=True, separators=(",", ":"))
+            decision_id = hashlib.sha256(("SOVEREIGN_WORKBENCH_ARCHIVE_REVIEW_V1\0" + canonical).encode()).hexdigest()
+            cursor = database.execute(
+                "INSERT OR IGNORE INTO archive_review_decisions("
+                "decision_id,source_id,batch_id,decision,topic,maturity,authority,confidence,privacy_status,"
+                "canonical_status,review_note,supersedes,replaced_by,research_question,reviewer,decided_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (decision_id, row["source_id"], row["batch_id"], row["decision"], row["topic"],
+                 row["maturity"], row["authority"], row["confidence"], row["privacy_status"],
+                 row["canonical_status"], row["review_note"], row["supersedes"], row["replaced_by"],
+                 row["research_question"], row["reviewer"].strip(), _now()),
+            )
+            imported += cursor.rowcount
+        database.commit()
+        return imported
+    except Exception:
+        database.rollback()
+        raise
