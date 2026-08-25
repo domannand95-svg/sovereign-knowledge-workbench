@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import sqlite3
 import csv
 import json
@@ -7,14 +8,65 @@ import zipfile
 import pytest
 
 from sovereign_workbench.intake import scan_files
-from sovereign_workbench.review_batches import (admit, connect, counts, create_next, export_review_csv,
-    import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
-    export_training_split, relationship_counts, routing_counts, store_relationships)
+from sovereign_workbench.review_batches import (admit as _admit, connect, counts, create_next, export_review_csv,
+    import_dataset_allocations, import_research_evidence_returns, import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
+    export_training_split, list_intake_roots, register_intake_root, relationship_counts,
+    routing_counts, store_relationships)
+
+
+def admit(database, root, records):
+    suffixes = {Path(record.relative_path).suffix for record in records}
+    register_intake_root(database, root, purpose="test intake", allowed_suffixes=suffixes)
+    return _admit(database, root, records)
 
 
 def make_files(root: Path, count: int) -> None:
     for index in range(count):
         (root / f"record-{index:03}.txt").write_text(f"record {index}", encoding="utf-8")
+
+
+def test_intake_root_must_be_explicit_hash_bound_and_append_only(tmp_path: Path):
+    root = tmp_path / "source"; root.mkdir(); make_files(root, 1)
+    with connect(tmp_path / "state.db") as database:
+        with pytest.raises(ValueError, match="not registered"):
+            _admit(database, root, scan_files(root))
+        admission = register_intake_root(
+            database, root, purpose="bounded source", allowed_suffixes={"txt"}
+        )
+        assert admission["inserted"] is True
+        assert admission["authority"] == "OBSERVE_ONLY"
+        assert register_intake_root(
+            database, root, purpose="bounded source", allowed_suffixes={".txt"}
+        )["inserted"] is False
+        assert _admit(database, root, scan_files(root)) == 1
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            database.execute("DELETE FROM archive_intake_roots")
+        listed = list_intake_roots(database)
+        assert len(listed) == 1 and listed[0]["admission_sha256"] == admission["admission_sha256"]
+
+
+def test_only_00_inbox_can_be_default_and_only_one_default_exists(tmp_path: Path):
+    wrong = tmp_path / "Inbox"; wrong.mkdir()
+    first = tmp_path / "00_Inbox"; first.mkdir()
+    second_parent = tmp_path / "other"; second_parent.mkdir()
+    second = second_parent / "00_Inbox"; second.mkdir()
+    with connect(tmp_path / "state.db") as database:
+        with pytest.raises(ValueError, match="exactly 00_Inbox"):
+            register_intake_root(database, wrong, purpose="default", allowed_suffixes={".txt"}, default=True)
+        register_intake_root(database, first, purpose="default", allowed_suffixes={".txt"}, default=True)
+        with pytest.raises(ValueError, match="default intake root"):
+            register_intake_root(database, second, purpose="second", allowed_suffixes={".txt"}, default=True)
+
+
+def test_intake_root_rejects_unadmitted_file_types_and_contract_changes(tmp_path: Path):
+    root = tmp_path / "source"; root.mkdir()
+    (root / "record.md").write_text("record", encoding="utf-8")
+    with connect(tmp_path / "state.db") as database:
+        register_intake_root(database, root, purpose="text only", allowed_suffixes={".txt"})
+        with pytest.raises(ValueError, match="outside"):
+            _admit(database, root, scan_files(root))
+        with pytest.raises(ValueError, match="different immutable admission"):
+            register_intake_root(database, root, purpose="changed", allowed_suffixes={".md"})
 
 
 def test_admission_is_hash_bound_and_idempotent(tmp_path: Path):
@@ -213,11 +265,86 @@ def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path)
         assert manifest["execution_authorized"] is False
         assert len(manifest["items"]) == 19
         assert all(item["status"] == "PROPOSED" for item in manifest["items"])
-        result = export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
-        assert result["train_examples"] + result["evaluation_examples"] == 20
-        train_ids = {json.loads(line)["source_id"] for line in (tmp_path / "train.jsonl").read_text(encoding="utf-8").splitlines()}
-        eval_ids = {json.loads(line)["source_id"] for line in (tmp_path / "eval.jsonl").read_text(encoding="utf-8").splitlines()}
-        assert train_ids.isdisjoint(eval_ids)
+        with pytest.raises(ValueError, match="400 approved allocated"):
+            export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
+
+
+def _returned_research(ticket: dict[str, object]) -> dict[str, object]:
+    value = {
+        "contract_version": "sovereign.workbench.research-evidence-return.v1",
+        "ticket_id": ticket["ticket_id"], "ticket_sha256": ticket["ticket_sha256"],
+        "source_id": ticket["source_id"], "source_sha256": ticket["source_sha256"],
+        "question": ticket["question"], "provider": "Gemini", "model": "deep-research",
+        "completed_at": "2026-08-25T00:00:00Z",
+        "findings": [{"claim": "example", "assessment": "unresolved"}],
+        "citations": [{"url": "https://example.test/primary", "title": "Primary"}],
+        "contradictory_evidence": [], "uncertainties": ["Independent confirmation required"],
+        "authority": "NONE",
+    }
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value["return_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return value
+
+
+def test_research_return_is_ticket_and_source_hash_bound_immutable_and_idempotent(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 1)
+    review = tmp_path / "review.csv"; tickets_path = tmp_path / "tickets.jsonl"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        rows[0].update({"decision": "NEEDS_RESEARCH", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "LOW",
+                        "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
+                        "review_note": "Verify claims", "reviewer": "Dominic",
+                        "research_question": "Which primary evidence supports this?"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        assert import_review_csv(database, review) == 1
+        assert export_research_tickets(database, tickets_path) == 1
+        ticket = json.loads(tickets_path.read_text(encoding="utf-8"))
+        assert ticket["source_sha256"] == rows[0]["source_sha256"]
+        returned = _returned_research(ticket)
+        returns_path = tmp_path / "returns.jsonl"
+        returns_path.write_text(json.dumps(returned) + "\n", encoding="utf-8")
+        assert import_research_evidence_returns(database, returns_path) == 1
+        assert import_research_evidence_returns(database, returns_path) == 0
+        stored = database.execute(
+            "SELECT ticket_id,source_sha256,authority FROM archive_research_evidence_returns"
+        ).fetchone()
+        assert stored == (ticket["ticket_id"], ticket["source_sha256"], "NONE")
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            database.execute("DELETE FROM archive_research_evidence_returns")
+
+
+def test_research_return_rejects_ticket_mismatch_authority_and_hash_tampering(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 1)
+    review = tmp_path / "review.csv"; tickets_path = tmp_path / "tickets.jsonl"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        rows[0].update({"decision": "NEEDS_RESEARCH", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "LOW",
+                        "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
+                        "review_note": "Verify", "reviewer": "Dominic", "research_question": "Evidence?"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        import_review_csv(database, review); export_research_tickets(database, tickets_path)
+        ticket = json.loads(tickets_path.read_text(encoding="utf-8"))
+        base = _returned_research(ticket); path = tmp_path / "return.jsonl"
+        for field, replacement, error in (
+            ("question", "different", "question"),
+            ("authority", "EXECUTE", "no authority"),
+            ("return_sha256", "0" * 64, "package hash"),
+        ):
+            changed = dict(base); changed[field] = replacement
+            path.write_text(json.dumps(changed) + "\n", encoding="utf-8")
+            with pytest.raises(ValueError, match=error):
+                import_research_evidence_returns(database, path)
+        assert database.execute("SELECT COUNT(*) FROM archive_research_evidence_returns").fetchone()[0] == 0
 
 
 def test_training_split_uses_latest_decision_without_source_leakage(tmp_path: Path):
@@ -241,15 +368,98 @@ def test_training_split_uses_latest_decision_without_source_leakage(tmp_path: Pa
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
         assert import_review_csv(database, review) == 1
 
-        result = export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
-        assert result["train_examples"] + result["evaluation_examples"] == 20
-        examples = []
-        for path in (tmp_path / "train.jsonl", tmp_path / "eval.jsonl"):
-            examples.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
-        assert len({example["source_id"] for example in examples}) == 20
-        corrected = [example for example in examples if example["source_id"] == rows[0]["source_id"]]
-        assert len(corrected) == 1
-        assert corrected[0]["expected"]["review_note"] == "Corrected review"
+        with pytest.raises(ValueError, match="400 approved allocated"):
+            export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
+
+
+DATASET_CATEGORIES = (
+    "SOVEREIGN_TERMINOLOGY", "AUTHORITY_BOUNDARY", "AUTHORITY_ESCALATION_REJECTION",
+    "SCHEMA_CONTRACT_INTERPRETATION", "STRUCTURED_OUTPUT", "ORDINARY_CODING",
+    "GENERAL_REASONING", "OUT_OF_DOMAIN", "HALLUCINATION_HANDLING", "REGRESSION",
+)
+
+
+def _allocation(row: dict[str, str], index: int, allocation: str) -> dict[str, str]:
+    value = {
+        "contract_version": "sovereign.workbench.dataset-allocation.v1",
+        "source_id": row["source_id"], "source_sha256": row["source_sha256"],
+        "source_family_id": f"family-{index:03}", "allocation": allocation,
+        "behavior_category": DATASET_CATEGORIES[index % len(DATASET_CATEGORIES)],
+        "reviewer": "Dominic", "reason": "Human assigned frozen dataset role",
+    }
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value["allocation_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return value
+
+
+def test_dataset_export_requires_approved_immutable_balanced_300_100_allocations(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 400)
+    review = tmp_path / "review.csv"; allocations_path = tmp_path / "allocations.jsonl"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database, limit=400)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        for row in rows:
+            row.update({"decision": "APPROVE", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "HIGH",
+                        "privacy_status": "Reviewed", "canonical_status": "CANONICAL",
+                        "review_note": "Human reviewed for dataset admission", "reviewer": "Dominic"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        assert import_review_csv(database, review) == 400
+        allocations = [_allocation(row, index, "TRAIN_ELIGIBLE" if index < 300 else "HELD_OUT_LOCKED")
+                       for index, row in enumerate(rows)]
+        allocations_path.write_text("".join(json.dumps(value) + "\n" for value in allocations),
+                                    encoding="utf-8")
+        assert import_dataset_allocations(database, allocations_path) == 400
+        assert import_dataset_allocations(database, allocations_path) == 0
+        train = tmp_path / "train.jsonl"; evaluation = tmp_path / "evaluation.jsonl"
+        result = export_training_split(database, train, evaluation)
+        assert result["train_examples"] == 300 and result["evaluation_examples"] == 100
+        train_examples = [json.loads(line) for line in train.read_text(encoding="utf-8").splitlines()]
+        eval_examples = [json.loads(line) for line in evaluation.read_text(encoding="utf-8").splitlines()]
+        assert {row["source_family_id"] for row in train_examples}.isdisjoint(
+            {row["source_family_id"] for row in eval_examples}
+        )
+        assert {row["behavior_category"] for row in train_examples + eval_examples} == set(DATASET_CATEGORIES)
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            database.execute("DELETE FROM archive_dataset_allocations")
+
+
+def test_dataset_allocation_rejects_nonapproved_source_and_family_leakage(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 2)
+    review = tmp_path / "review.csv"; allocation_path = tmp_path / "allocation.jsonl"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        for row in rows:
+            row.update({"decision": "APPROVE", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "HIGH",
+                        "privacy_status": "Reviewed", "canonical_status": "CANONICAL",
+                        "review_note": "Reviewed", "reviewer": "Dominic"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        import_review_csv(database, review)
+        first = _allocation(rows[0], 0, "TRAIN_ELIGIBLE")
+        first["source_family_id"] = "shared-family"
+        first["allocation_sha256"] = hashlib.sha256(json.dumps(
+            {key: value for key, value in first.items() if key != "allocation_sha256"},
+            sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        allocation_path.write_text(json.dumps(first) + "\n", encoding="utf-8")
+        assert import_dataset_allocations(database, allocation_path) == 1
+        second = _allocation(rows[1], 1, "HELD_OUT_LOCKED")
+        second["source_family_id"] = "shared-family"
+        second["allocation_sha256"] = hashlib.sha256(json.dumps(
+            {key: value for key, value in second.items() if key != "allocation_sha256"},
+            sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        allocation_path.write_text(json.dumps(second) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="cannot cross"):
+            import_dataset_allocations(database, allocation_path)
 
 
 def test_formatted_excel_export_is_valid_and_non_overwriting(tmp_path: Path):

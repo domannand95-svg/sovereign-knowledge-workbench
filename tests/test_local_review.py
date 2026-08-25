@@ -4,7 +4,13 @@ import pytest
 
 from sovereign_workbench.intake import scan_files
 from sovereign_workbench.local_review import ReviewController, propose_research_question
-from sovereign_workbench.review_batches import admit, connect, create_next, store_candidates
+from sovereign_workbench.review_batches import (admit as _admit, connect, create_next,
+                                                 register_intake_root, store_candidates)
+
+
+def admit(database, root, records):
+    register_intake_root(database, root, purpose="test intake", allowed_suffixes={".txt", ".docx"})
+    return _admit(database, root, records)
 
 
 def prepared(tmp_path: Path):

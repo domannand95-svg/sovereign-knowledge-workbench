@@ -22,6 +22,8 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              relationship_counts, routing_counts, store_candidates,
                              store_relationships)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
+from .review_batches import list_intake_roots, register_intake_root
+from .review_batches import import_dataset_allocations, import_research_evidence_returns
 from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
@@ -131,6 +133,14 @@ def parser() -> argparse.ArgumentParser:
     stage_recover.add_argument("--state-db", required=True, type=Path)
     stage_status = commands.add_parser("stage-status", help="Show reversible staging journal counts")
     stage_status.add_argument("--state-db", required=True, type=Path)
+    intake_register = commands.add_parser("archive-intake-register", help="Register one immutable observation-only archive intake root")
+    intake_register.add_argument("root", type=Path)
+    intake_register.add_argument("--state-db", required=True, type=Path)
+    intake_register.add_argument("--purpose", required=True)
+    intake_register.add_argument("--include", nargs="+", required=True)
+    intake_register.add_argument("--default", action="store_true")
+    intake_list = commands.add_parser("archive-intake-list", help="List immutable archive intake-root admissions")
+    intake_list.add_argument("--state-db", required=True, type=Path)
     batch_create = commands.add_parser("archive-batch-create", help="Admit archive files and create the next immutable review batch")
     batch_create.add_argument("root", type=Path); batch_create.add_argument("--state-db", required=True, type=Path)
     batch_create.add_argument("--include", nargs="+", required=True); batch_create.add_argument("--limit", type=int, default=25)
@@ -149,11 +159,17 @@ def parser() -> argparse.ArgumentParser:
     batch_status.add_argument("--state-db", required=True, type=Path)
     research_export = commands.add_parser("archive-research-export", help="Export approved draft research tickets")
     research_export.add_argument("--state-db", required=True, type=Path); research_export.add_argument("--output", required=True, type=Path)
+    research_import = commands.add_parser("archive-research-import", help="Import immutable hash-bound returned research evidence")
+    research_import.add_argument("input", type=Path)
+    research_import.add_argument("--state-db", required=True, type=Path)
     manifest_export = commands.add_parser("archive-staging-manifest", help="Export an inert hash-bound staging manifest")
     manifest_export.add_argument("--state-db", required=True, type=Path); manifest_export.add_argument("--output", required=True, type=Path)
     dataset_export = commands.add_parser("archive-dataset-export", help="Export deterministic reviewed train/evaluation splits")
     dataset_export.add_argument("--state-db", required=True, type=Path); dataset_export.add_argument("--train", required=True, type=Path)
     dataset_export.add_argument("--evaluation", required=True, type=Path)
+    dataset_allocate = commands.add_parser("archive-dataset-allocate", help="Import immutable human dataset allocations")
+    dataset_allocate.add_argument("input", type=Path)
+    dataset_allocate.add_argument("--state-db", required=True, type=Path)
     return root
 
 
@@ -234,6 +250,18 @@ def main(argv: list[str] | None = None) -> int:
             with connect_staging(args.state_db) as database:
                 print(json.dumps(staging_status_counts(database), sort_keys=True))
             return 0
+        if args.command == "archive-intake-register":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(register_intake_root(
+                    database, args.root, purpose=args.purpose,
+                    allowed_suffixes=set(args.include), default=args.default,
+                ), sort_keys=True))
+            return 0
+        if args.command == "archive-intake-list":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({"roots": list_intake_roots(database), "authority": "observe_only"},
+                                 sort_keys=True))
+            return 0
         if args.command == "archive-batch-create":
             suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}
             corpus_records = scan_files(args.root, max_file_bytes=args.max_file_mb * 1024 * 1024,
@@ -308,6 +336,11 @@ def main(argv: list[str] | None = None) -> int:
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps({"tickets": export_research_tickets(database, args.output), "authority": "none"}, sort_keys=True))
             return 0
+        if args.command == "archive-research-import":
+            with connect_review_batches(args.state_db) as database:
+                imported = import_research_evidence_returns(database, args.input)
+                print(json.dumps({"imported": imported, "authority": "none"}, sort_keys=True))
+            return 0
         if args.command == "archive-staging-manifest":
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps(export_staging_manifest(database, args.output), sort_keys=True))
@@ -315,6 +348,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "archive-dataset-export":
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps(export_training_split(database, args.train, args.evaluation), sort_keys=True))
+            return 0
+        if args.command == "archive-dataset-allocate":
+            with connect_review_batches(args.state_db) as database:
+                imported = import_dataset_allocations(database, args.input)
+                print(json.dumps({"imported": imported, "authority": "none",
+                                  "training_authorized": False}, sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file

@@ -11,6 +11,17 @@ from .model import FileRecord
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS archive_intake_roots (
+  root_id TEXT PRIMARY KEY,
+  canonical_root TEXT NOT NULL UNIQUE,
+  root_mode TEXT NOT NULL CHECK(root_mode IN ('DEFAULT','EXPLICIT')),
+  purpose TEXT NOT NULL,
+  allowed_suffixes TEXT NOT NULL,
+  admission_sha256 TEXT NOT NULL UNIQUE,
+  admitted_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS archive_intake_single_default_idx
+  ON archive_intake_roots(root_mode) WHERE root_mode='DEFAULT';
 CREATE TABLE IF NOT EXISTS review_sources (
   source_id TEXT PRIMARY KEY,
   root TEXT NOT NULL,
@@ -93,6 +104,38 @@ CREATE TABLE IF NOT EXISTS archive_review_relationships (
   authority TEXT NOT NULL CHECK(authority='NONE'),
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS archive_research_evidence_returns (
+  return_id TEXT PRIMARY KEY,
+  ticket_id TEXT NOT NULL,
+  ticket_sha256 TEXT NOT NULL,
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  question TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  findings_json TEXT NOT NULL,
+  citations_json TEXT NOT NULL,
+  contradictory_evidence_json TEXT NOT NULL,
+  uncertainties_json TEXT NOT NULL,
+  return_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  imported_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_dataset_allocations (
+  allocation_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL UNIQUE REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  source_family_id TEXT NOT NULL,
+  allocation TEXT NOT NULL CHECK(allocation IN (
+    'TRAIN_ELIGIBLE','HELD_OUT_LOCKED','RESEARCH_ONLY','EXCLUDED'
+  )),
+  behavior_category TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  allocation_sha256 TEXT NOT NULL UNIQUE,
+  assigned_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS review_batches_no_update
   BEFORE UPDATE ON review_batches BEGIN SELECT RAISE(ABORT, 'review batches are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batches_no_delete
@@ -117,6 +160,18 @@ CREATE TRIGGER IF NOT EXISTS archive_review_relationships_no_update
   BEFORE UPDATE ON archive_review_relationships BEGIN SELECT RAISE(ABORT, 'archive review relationships are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_review_relationships_no_delete
   BEFORE DELETE ON archive_review_relationships BEGIN SELECT RAISE(ABORT, 'archive review relationships are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_intake_roots_no_update
+  BEFORE UPDATE ON archive_intake_roots BEGIN SELECT RAISE(ABORT, 'archive intake roots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_intake_roots_no_delete
+  BEFORE DELETE ON archive_intake_roots BEGIN SELECT RAISE(ABORT, 'archive intake roots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_research_evidence_returns_no_update
+  BEFORE UPDATE ON archive_research_evidence_returns BEGIN SELECT RAISE(ABORT, 'research evidence returns are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_research_evidence_returns_no_delete
+  BEFORE DELETE ON archive_research_evidence_returns BEGIN SELECT RAISE(ABORT, 'research evidence returns are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_dataset_allocations_no_update
+  BEFORE UPDATE ON archive_dataset_allocations BEGIN SELECT RAISE(ABORT, 'dataset allocations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_dataset_allocations_no_delete
+  BEFORE DELETE ON archive_dataset_allocations BEGIN SELECT RAISE(ABORT, 'dataset allocations are immutable'); END;
 """
 
 TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
@@ -126,6 +181,12 @@ DECISIONS = {"APPROVE", "REJECT", "NEEDS_RESEARCH", "QUARANTINE"}
 REVIEW_ROUTES = {"SPOT_CHECK_ELIGIBLE", "MANUAL_REVIEW_REQUIRED", "RECOVERY_REQUIRED"}
 RELATIONSHIP_TYPES = {"EXACT_DUPLICATE", "POSSIBLE_PARENT", "VERSION_SIBLING",
                       "POSSIBLE_SUPERSEDES", "HASH_COMPANION"}
+DATASET_ALLOCATIONS = {"TRAIN_ELIGIBLE", "HELD_OUT_LOCKED", "RESEARCH_ONLY", "EXCLUDED"}
+BEHAVIOR_CATEGORIES = {
+    "SOVEREIGN_TERMINOLOGY", "AUTHORITY_BOUNDARY", "AUTHORITY_ESCALATION_REJECTION",
+    "SCHEMA_CONTRACT_INTERPRETATION", "STRUCTURED_OUTPUT", "ORDINARY_CODING",
+    "GENERAL_REASONING", "OUT_OF_DOMAIN", "HALLUCINATION_HANDLING", "REGRESSION",
+}
 REVIEW_COLUMNS = (
     "batch_id", "source_id", "source_path", "source_sha256", "modified_ns", "extraction_status",
     "model_summary", "proposed_topic", "proposed_maturity", "proposed_authority", "proposal_reason",
@@ -157,12 +218,88 @@ def _source_id(root: str, record: FileRecord) -> str:
     return digest.hexdigest()
 
 
+def _normalise_suffixes(values: set[str]) -> tuple[str, ...]:
+    suffixes = tuple(sorted({
+        value.casefold() if value.startswith(".") else f".{value.casefold()}"
+        for value in values if value.strip()
+    }))
+    if not suffixes:
+        raise ValueError("At least one allowed intake file type is required")
+    return suffixes
+
+
+def register_intake_root(database: sqlite3.Connection, root: Path, *, purpose: str,
+                         allowed_suffixes: set[str], default: bool = False) -> dict[str, object]:
+    """Append one observation-only intake-root admission; never grants file mutation authority."""
+    canonical_root = str(root.resolve(strict=True))
+    if not root.resolve(strict=True).is_dir():
+        raise ValueError("An intake root must be an existing directory")
+    if not purpose.strip():
+        raise ValueError("An intake-root purpose is required")
+    mode = "DEFAULT" if default else "EXPLICIT"
+    if default and Path(canonical_root).name != "00_Inbox":
+        raise ValueError("The default intake root basename must be exactly 00_Inbox")
+    suffixes = _normalise_suffixes(allowed_suffixes)
+    contract = {
+        "contract_version": "sovereign.workbench.intake-root.v1",
+        "canonical_root": canonical_root,
+        "root_mode": mode,
+        "purpose": purpose.strip(),
+        "allowed_suffixes": list(suffixes),
+        "authority": "OBSERVE_ONLY",
+    }
+    canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+    admission_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    root_id = f"IR-{admission_sha256[:24]}"
+    existing = database.execute(
+        "SELECT root_id,root_mode,purpose,allowed_suffixes,admission_sha256 "
+        "FROM archive_intake_roots WHERE canonical_root=?", (canonical_root,),
+    ).fetchone()
+    if existing:
+        expected = (root_id, mode, purpose.strip(), json.dumps(suffixes), admission_sha256)
+        if existing != expected:
+            raise ValueError("This intake root already has a different immutable admission")
+        return {**contract, "root_id": root_id, "admission_sha256": admission_sha256,
+                "inserted": False}
+    try:
+        database.execute(
+            "INSERT INTO archive_intake_roots VALUES(?,?,?,?,?,?,?)",
+            (root_id, canonical_root, mode, purpose.strip(), json.dumps(suffixes),
+             admission_sha256, _now()),
+        )
+        database.commit()
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("A default intake root is already registered") from exc
+    return {**contract, "root_id": root_id, "admission_sha256": admission_sha256,
+            "inserted": True}
+
+
+def list_intake_roots(database: sqlite3.Connection) -> list[dict[str, object]]:
+    rows = database.execute(
+        "SELECT root_id,canonical_root,root_mode,purpose,allowed_suffixes,admission_sha256,admitted_at "
+        "FROM archive_intake_roots ORDER BY CASE root_mode WHEN 'DEFAULT' THEN 0 ELSE 1 END,canonical_root"
+    ).fetchall()
+    return [{"root_id": row[0], "canonical_root": row[1], "root_mode": row[2],
+             "purpose": row[3], "allowed_suffixes": list(json.loads(row[4])),
+             "admission_sha256": row[5], "admitted_at": row[6], "authority": "OBSERVE_ONLY"}
+            for row in rows]
+
+
 def admit(database: sqlite3.Connection, root: Path, records: list[FileRecord]) -> int:
     canonical_root = str(root.resolve(strict=True))
+    admission = database.execute(
+        "SELECT allowed_suffixes FROM archive_intake_roots WHERE canonical_root=?",
+        (canonical_root,),
+    ).fetchone()
+    if not admission:
+        raise ValueError("Archive root is not registered for intake")
+    allowed_suffixes = set(json.loads(admission[0]))
     admitted = 0
     for record in records:
         if not record.sha256:
             continue
+        if Path(record.relative_path).suffix.casefold() not in allowed_suffixes:
+            raise ValueError("A source file type is outside the intake-root admission")
         source_id = _source_id(canonical_root, record)
         cursor = database.execute(
             "INSERT OR IGNORE INTO review_sources("
@@ -579,24 +716,185 @@ def record_review_decision(database: sqlite3.Connection, row: dict[str, str], *,
     return cursor.rowcount
 
 
+def _research_ticket(decision_id: str, source_id: str, source_sha256: str, topic: str,
+                     question: str, privacy: str, note: str) -> dict[str, object]:
+    ticket = {"contract_version": "sovereign.workbench.research-ticket.v1",
+              "ticket_id": f"RQ-{decision_id[:16]}", "source_id": source_id,
+              "source_sha256": source_sha256, "module_id": topic, "question": question,
+              "review_context": note, "privacy_status": privacy, "status": "DRAFT",
+              "authority": "NONE",
+              "requested_output": {"primary_sources": True, "contradictory_evidence": True,
+                                   "uncertainty": True, "direct_source_urls": True}}
+    canonical = json.dumps(ticket, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    ticket["ticket_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return ticket
+
+
 def export_research_tickets(database: sqlite3.Connection, output: Path) -> int:
     if output.exists():
         raise ValueError("Research-ticket export already exists")
     rows = database.execute(
-        "SELECT decision_id,source_id,topic,research_question,privacy_status,review_note "
-        "FROM archive_review_decisions WHERE decision='NEEDS_RESEARCH' ORDER BY decision_id"
+        "SELECT d.decision_id,d.source_id,s.source_sha256,d.topic,d.research_question,"
+        "d.privacy_status,d.review_note FROM archive_review_decisions d "
+        "JOIN review_sources s ON s.source_id=d.source_id "
+        "WHERE d.decision='NEEDS_RESEARCH' ORDER BY d.decision_id"
     ).fetchall()
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8", newline="\n") as stream:
-        for decision_id, source_id, topic, question, privacy, note in rows:
-            ticket = {"contract_version": "sovereign.workbench.research-ticket.v1",
-                      "ticket_id": f"RQ-{decision_id[:16]}", "source_id": source_id,
-                      "module_id": topic, "question": question, "review_context": note,
-                      "privacy_status": privacy, "status": "DRAFT", "authority": "NONE",
-                      "requested_output": {"primary_sources": True, "contradictory_evidence": True,
-                                           "uncertainty": True, "direct_source_urls": True}}
+        for decision_id, source_id, source_sha256, topic, question, privacy, note in rows:
+            ticket = _research_ticket(decision_id, source_id, source_sha256, topic, question,
+                                      privacy, note)
             stream.write(json.dumps(ticket, ensure_ascii=False, sort_keys=True) + "\n")
     return len(rows)
+
+
+RESEARCH_RETURN_FIELDS = {
+    "contract_version", "ticket_id", "ticket_sha256", "source_id", "source_sha256",
+    "question", "provider", "model", "completed_at", "findings", "citations",
+    "contradictory_evidence", "uncertainties", "authority", "return_sha256",
+}
+
+
+def _expected_ticket(database: sqlite3.Connection, ticket_id: str) -> dict[str, object]:
+    if not ticket_id.startswith("RQ-") or len(ticket_id) != 19:
+        raise ValueError("Research return ticket identifier is invalid")
+    prefix = ticket_id[3:]
+    rows = database.execute(
+        "SELECT d.decision_id,d.source_id,s.source_sha256,d.topic,d.research_question,"
+        "d.privacy_status,d.review_note FROM archive_review_decisions d "
+        "JOIN review_sources s ON s.source_id=d.source_id "
+        "WHERE d.decision='NEEDS_RESEARCH' AND d.decision_id LIKE ?",
+        (prefix + "%",),
+    ).fetchall()
+    if len(rows) != 1:
+        raise ValueError("Research return does not resolve to exactly one reviewed ticket")
+    return _research_ticket(*rows[0])
+
+
+def import_research_evidence_returns(database: sqlite3.Connection, input_path: Path) -> int:
+    """Append hash-bound provider evidence; never changes review or operational authority."""
+    imported = 0
+    with input_path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Research return line {line_number} is not valid JSON") from exc
+            if not isinstance(value, dict) or set(value) != RESEARCH_RETURN_FIELDS:
+                raise ValueError("Research return fields do not match the frozen contract")
+            if value["contract_version"] != "sovereign.workbench.research-evidence-return.v1":
+                raise ValueError("Unsupported research evidence return contract")
+            if value["authority"] != "NONE":
+                raise ValueError("Research evidence returns must have no authority")
+            for field in ("ticket_id", "ticket_sha256", "source_id", "source_sha256",
+                          "question", "provider", "model", "completed_at", "return_sha256"):
+                if not isinstance(value[field], str) or not value[field].strip():
+                    raise ValueError(f"Research return {field} must be non-empty text")
+            for field in ("findings", "citations", "contradictory_evidence", "uncertainties"):
+                if not isinstance(value[field], list):
+                    raise ValueError(f"Research return {field} must be a list")
+            expected = _expected_ticket(database, value["ticket_id"])
+            for field in ("ticket_id", "ticket_sha256", "source_id", "source_sha256", "question"):
+                if value[field] != expected[field]:
+                    raise ValueError(f"Research return {field} does not match its frozen ticket")
+            hash_input = {key: value[key] for key in sorted(RESEARCH_RETURN_FIELDS - {"return_sha256"})}
+            canonical = json.dumps(hash_input, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":"))
+            calculated = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if value["return_sha256"] != calculated:
+                raise ValueError("Research return package hash is invalid")
+            return_id = f"RR-{calculated[:24]}"
+            cursor = database.execute(
+                "INSERT OR IGNORE INTO archive_research_evidence_returns VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (return_id, value["ticket_id"], value["ticket_sha256"], value["source_id"],
+                 value["source_sha256"], value["question"], value["provider"], value["model"],
+                 value["completed_at"], json.dumps(value["findings"], ensure_ascii=False, sort_keys=True),
+                 json.dumps(value["citations"], ensure_ascii=False, sort_keys=True),
+                 json.dumps(value["contradictory_evidence"], ensure_ascii=False, sort_keys=True),
+                 json.dumps(value["uncertainties"], ensure_ascii=False, sort_keys=True),
+                 calculated, "NONE", _now()),
+            )
+            imported += cursor.rowcount
+    database.commit()
+    return imported
+
+
+DATASET_ALLOCATION_FIELDS = {
+    "contract_version", "source_id", "source_sha256", "source_family_id", "allocation",
+    "behavior_category", "reviewer", "reason", "allocation_sha256",
+}
+
+
+def import_dataset_allocations(database: sqlite3.Connection, input_path: Path) -> int:
+    """Append human dataset allocations without granting training execution authority."""
+    imported = 0
+    with input_path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Dataset allocation line {line_number} is not valid JSON") from exc
+            if not isinstance(value, dict) or set(value) != DATASET_ALLOCATION_FIELDS:
+                raise ValueError("Dataset allocation fields do not match the frozen contract")
+            if value["contract_version"] != "sovereign.workbench.dataset-allocation.v1":
+                raise ValueError("Unsupported dataset allocation contract")
+            for field in ("source_id", "source_sha256", "source_family_id", "allocation",
+                          "behavior_category", "reviewer", "reason", "allocation_sha256"):
+                if not isinstance(value[field], str) or not value[field].strip():
+                    raise ValueError(f"Dataset allocation {field} must be non-empty text")
+            if value["allocation"] not in DATASET_ALLOCATIONS:
+                raise ValueError("Dataset allocation has an invalid controlled value")
+            if value["behavior_category"] not in BEHAVIOR_CATEGORIES:
+                raise ValueError("Dataset allocation behavior category is invalid")
+            source = database.execute(
+                "SELECT source_sha256 FROM review_sources WHERE source_id=?", (value["source_id"],)
+            ).fetchone()
+            if not source or source[0] != value["source_sha256"]:
+                raise ValueError("Dataset allocation source identity mismatch")
+            latest = database.execute(
+                "SELECT decision,privacy_status,canonical_status FROM archive_review_decisions "
+                "WHERE source_id=? ORDER BY decided_at DESC,decision_id DESC LIMIT 1",
+                (value["source_id"],),
+            ).fetchone()
+            if not latest:
+                raise ValueError("Dataset allocation requires a human review decision")
+            if value["allocation"] in {"TRAIN_ELIGIBLE", "HELD_OUT_LOCKED"}:
+                if latest[0] != "APPROVE" or latest[1] != "Reviewed":
+                    raise ValueError("Training and held-out allocations require an approved privacy-reviewed source")
+                if latest[2] in {"DUPLICATE", "SUPERSEDED", "UNRESOLVED"}:
+                    raise ValueError("Training and held-out allocations require resolved canonical status")
+            family_splits = database.execute(
+                "SELECT DISTINCT allocation FROM archive_dataset_allocations WHERE source_family_id=? "
+                "AND allocation IN ('TRAIN_ELIGIBLE','HELD_OUT_LOCKED')",
+                (value["source_family_id"],),
+            ).fetchall()
+            desired = value["allocation"]
+            if family_splits and desired in {"TRAIN_ELIGIBLE", "HELD_OUT_LOCKED"}:
+                if any(row[0] != desired for row in family_splits):
+                    raise ValueError("A source family cannot cross the train and held-out boundary")
+            hash_input = {key: value[key] for key in sorted(DATASET_ALLOCATION_FIELDS - {"allocation_sha256"})}
+            canonical = json.dumps(hash_input, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":"))
+            calculated = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if value["allocation_sha256"] != calculated:
+                raise ValueError("Dataset allocation hash is invalid")
+            allocation_id = f"DA-{calculated[:24]}"
+            try:
+                cursor = database.execute(
+                    "INSERT OR IGNORE INTO archive_dataset_allocations VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (allocation_id, value["source_id"], value["source_sha256"],
+                     value["source_family_id"], desired, value["behavior_category"],
+                     value["reviewer"].strip(), value["reason"].strip(), calculated, _now()),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("A source already has a different immutable dataset allocation") from exc
+            imported += cursor.rowcount
+    database.commit()
+    return imported
 
 
 def export_staging_manifest(database: sqlite3.Connection, output: Path) -> dict[str, object]:
@@ -632,19 +930,35 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
         "SELECT d.decision_id,d.source_id,d.decision,d.topic,d.maturity,d.authority,d.confidence,"
         "d.privacy_status,d.canonical_status,d.review_note,d.research_question,"
         "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
-        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,'') "
-        "FROM ranked_decisions d LEFT JOIN archive_review_candidates c ON c.source_id=d.source_id "
-        "WHERE d.decision_rank=1 ORDER BY d.source_id"
+        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,''),"
+        "a.allocation,a.source_family_id,a.behavior_category "
+        "FROM ranked_decisions d JOIN archive_dataset_allocations a ON a.source_id=d.source_id "
+        "LEFT JOIN archive_review_candidates c ON c.source_id=d.source_id "
+        "WHERE d.decision_rank=1 AND a.allocation IN ('TRAIN_ELIGIBLE','HELD_OUT_LOCKED') "
+        "ORDER BY d.source_id"
     ).fetchall()
-    if len(rows) < 5:
-        raise ValueError("At least five reviewed examples are required for a split")
+    if len(rows) < 400:
+        raise ValueError("At least 400 approved allocated examples are required for dataset export")
     train_rows, eval_rows = [], []
+    family_splits: dict[str, str] = {}
+    category_counts = {category: 0 for category in BEHAVIOR_CATEGORIES}
+    train_category_counts = {category: 0 for category in BEHAVIOR_CATEGORIES}
     for row in rows:
         (decision_id, source_id, decision, topic, maturity, authority, confidence, privacy,
          canonical, note, question, summary, proposed_topic, proposed_maturity,
-         proposed_authority, reason) = row
+         proposed_authority, reason, allocation, family_id, category) = row
+        if decision != "APPROVE" or privacy != "Reviewed" or canonical in {
+                "DUPLICATE", "SUPERSEDED", "UNRESOLVED"}:
+            raise ValueError("Dataset export encountered an ineligible review decision")
+        previous = family_splits.setdefault(family_id, allocation)
+        if previous != allocation:
+            raise ValueError("A source family crosses the train and held-out boundary")
+        category_counts[category] += 1
+        if allocation == "TRAIN_ELIGIBLE":
+            train_category_counts[category] += 1
         example = {"contract_version": "sovereign.workbench.review-example.v1",
                    "example_id": decision_id, "source_id": source_id,
+                   "source_family_id": family_id, "behavior_category": category,
                    "input": {"summary": summary, "proposed_topic": proposed_topic,
                              "proposed_maturity": proposed_maturity,
                              "proposed_authority": proposed_authority, "proposal_reason": reason},
@@ -652,10 +966,14 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
                                 "authority": authority, "confidence": confidence,
                                 "privacy_status": privacy, "canonical_status": canonical,
                                 "review_note": note, "research_question": question}}
-        bucket = int(hashlib.sha256(source_id.encode()).hexdigest()[:8], 16) % 5
-        (eval_rows if bucket == 0 else train_rows).append(example)
-    if not train_rows or not eval_rows:
-        raise ValueError("Deterministic split requires examples spanning both hash buckets")
+        (train_rows if allocation == "TRAIN_ELIGIBLE" else eval_rows).append(example)
+    if len(train_rows) < 300 or len(eval_rows) < 100:
+        raise ValueError("Dataset export requires at least 300 train and 100 locked held-out examples")
+    missing = sorted(category for category, count in category_counts.items() if count < 25)
+    if missing:
+        raise ValueError("Every critical behavior category requires at least 25 examples")
+    if any(count / len(train_rows) > 0.30 for count in train_category_counts.values()):
+        raise ValueError("No behavior category may exceed 30 percent of the training set")
     for path, values in ((train, train_rows), (evaluation, eval_rows)):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8", newline="\n") as stream:
