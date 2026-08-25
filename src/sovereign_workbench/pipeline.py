@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .analysis import classify, privacy_findings, research_gaps
+from .epistemic import assess
 from .intake import duplicate_groups, scan_files
 from .local_model import LocalModelConfig, ModelError, classify_with_local_model
 from .model import ActionProposal, Finding, WorkbenchReport
@@ -51,6 +52,9 @@ def analyze_workspace(
                     "model_failure", "medium", str(exc), record.relative_path,
                 ))
         report.classifications[record.relative_path] = classification
+        report.artifact_assessments[record.relative_path] = assess(
+            record, exact_duplicate=record.relative_path in duplicate_paths,
+        )
         file_findings = privacy_findings(record)
         report.findings.extend(file_findings)
         report.research_queue.extend(research_gaps(record))
