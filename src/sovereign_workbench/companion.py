@@ -42,6 +42,15 @@ class CompanionConfig:
     token_ttl_seconds: int = 8 * 60 * 60
     rate_limit_per_minute: int = 120
 
+    def __post_init__(self) -> None:
+        for origin in self.allowed_origins:
+            parsed = urlparse(origin)
+            if (any(ord(character) < 0x20 or ord(character) == 0x7f for character in origin)
+                    or parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.path or parsed.params
+                    or parsed.query or parsed.fragment):
+                raise ValueError("Allowed origins must be canonical HTTP(S) origins")
+
 
 @dataclass
 class CompanionService:

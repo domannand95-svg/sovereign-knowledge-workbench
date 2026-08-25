@@ -62,6 +62,18 @@ def test_origin_is_fail_closed(companion):
     assert denied.value.code == 403
 
 
+@pytest.mark.parametrize("origin", [
+    "https://app.base44.com\r\nX-Injected: true",
+    "https://user:password@app.base44.com",
+    "https://app.base44.com/path",
+    "file://app.base44.com",
+])
+def test_config_rejects_noncanonical_or_header_injection_origins(tmp_path: Path, origin: str):
+    with pytest.raises(ValueError, match="canonical HTTP"):
+        CompanionConfig(tmp_path / "jobs.db", tmp_path / "staging.db", "test-token",
+                        frozenset({origin}))
+
+
 def test_contract_mismatch_and_expired_token_fail_closed(tmp_path: Path):
     config = CompanionConfig(tmp_path / "jobs.db", tmp_path / "staging.db", "test-token",
                              frozenset({"https://app.base44.com"}), token_ttl_seconds=0)
