@@ -79,6 +79,20 @@ CREATE TABLE IF NOT EXISTS archive_review_routes (
   route_sha256 TEXT NOT NULL,
   generated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS archive_review_relationships (
+  relationship_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  batch_id TEXT NOT NULL REFERENCES review_batches(batch_id),
+  relationship_type TEXT NOT NULL CHECK(relationship_type IN (
+    'EXACT_DUPLICATE','POSSIBLE_PARENT','VERSION_SIBLING','POSSIBLE_SUPERSEDES','HASH_COMPANION'
+  )),
+  related_relative_path TEXT NOT NULL,
+  related_sha256 TEXT NOT NULL,
+  confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+  evidence TEXT NOT NULL,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  created_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS review_batches_no_update
   BEFORE UPDATE ON review_batches BEGIN SELECT RAISE(ABORT, 'review batches are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batches_no_delete
@@ -99,6 +113,10 @@ CREATE TRIGGER IF NOT EXISTS archive_review_routes_no_update
   BEFORE UPDATE ON archive_review_routes BEGIN SELECT RAISE(ABORT, 'archive review routes are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_review_routes_no_delete
   BEFORE DELETE ON archive_review_routes BEGIN SELECT RAISE(ABORT, 'archive review routes are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_review_relationships_no_update
+  BEFORE UPDATE ON archive_review_relationships BEGIN SELECT RAISE(ABORT, 'archive review relationships are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_review_relationships_no_delete
+  BEFORE DELETE ON archive_review_relationships BEGIN SELECT RAISE(ABORT, 'archive review relationships are immutable'); END;
 """
 
 TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
@@ -106,10 +124,12 @@ MATURITIES = {"Production", "Normative specification", "Proposed specification",
 AUTHORITIES = {"Implemented authority boundary", "Non-authoritative candidate", "No authority", "Needs review"}
 DECISIONS = {"APPROVE", "REJECT", "NEEDS_RESEARCH", "QUARANTINE"}
 REVIEW_ROUTES = {"SPOT_CHECK_ELIGIBLE", "MANUAL_REVIEW_REQUIRED", "RECOVERY_REQUIRED"}
+RELATIONSHIP_TYPES = {"EXACT_DUPLICATE", "POSSIBLE_PARENT", "VERSION_SIBLING",
+                      "POSSIBLE_SUPERSEDES", "HASH_COMPANION"}
 REVIEW_COLUMNS = (
     "batch_id", "source_id", "source_path", "source_sha256", "modified_ns", "extraction_status",
     "model_summary", "proposed_topic", "proposed_maturity", "proposed_authority", "proposal_reason",
-    "classification_confidence", "review_route", "route_reasons",
+    "classification_confidence", "review_route", "route_reasons", "relationship_candidates",
     "decision", "topic", "maturity", "authority", "confidence", "privacy_status",
     "canonical_status", "review_note", "supersedes", "replaced_by", "research_question", "reviewer",
 )
@@ -211,7 +231,7 @@ def routing_counts(database: sqlite3.Connection) -> dict[str, int]:
 
 
 def _review_rows(database: sqlite3.Connection, batch_id: str) -> list[tuple[object, ...]]:
-    return database.execute(
+    rows = database.execute(
         "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status,"
         "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
         "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,''),"
@@ -222,6 +242,18 @@ def _review_rows(database: sqlite3.Connection, batch_id: str) -> list[tuple[obje
         "LEFT JOIN archive_review_routes r ON r.source_id=s.source_id "
         "WHERE i.batch_id=? ORDER BY i.ordinal", (batch_id,),
     ).fetchall()
+    relationships: dict[str, list[dict[str, object]]] = {}
+    for source_id, relation, path, digest, confidence, evidence in database.execute(
+        "SELECT source_id,relationship_type,related_relative_path,related_sha256,confidence,evidence "
+        "FROM archive_review_relationships WHERE batch_id=? "
+        "ORDER BY source_id,relationship_type,related_relative_path", (batch_id,),
+    ):
+        relationships.setdefault(source_id, []).append({
+            "type": relation, "path": path, "sha256": digest,
+            "confidence": confidence, "evidence": evidence,
+        })
+    return [row + (json.dumps(relationships.get(row[0], []), separators=(",", ":")),)
+            for row in rows]
 
 
 def export_review_csv(database: sqlite3.Connection, batch_id: str, output: Path) -> Path:
@@ -235,7 +267,8 @@ def export_review_csv(database: sqlite3.Connection, batch_id: str, output: Path)
         writer = csv.DictWriter(stream, fieldnames=REVIEW_COLUMNS)
         writer.writeheader()
         for (source_id, path, digest, modified_ns, extraction_status, summary, topic, maturity,
-             authority, reason, classification_confidence, review_route, route_reasons) in rows:
+             authority, reason, classification_confidence, review_route, route_reasons,
+             relationship_candidates) in rows:
             value = {column: "" for column in REVIEW_COLUMNS}
             value.update({"batch_id": batch_id, "source_id": source_id, "source_path": path,
                           "source_sha256": digest, "modified_ns": modified_ns,
@@ -245,6 +278,7 @@ def export_review_csv(database: sqlite3.Connection, batch_id: str, output: Path)
                           "proposal_reason": reason,
                           "classification_confidence": classification_confidence,
                           "review_route": review_route, "route_reasons": route_reasons,
+                          "relationship_candidates": relationship_candidates,
                           "topic": "Needs review", "maturity": "Needs review",
                           "authority": "Needs review", "confidence": "UNKNOWN",
                           "privacy_status": "Needs review", "canonical_status": "UNRESOLVED"})
@@ -276,14 +310,16 @@ def export_review_xlsx(database: sqlite3.Connection, batch_id: str, output: Path
                     "canonical_status": "UNRESOLVED"}
         for row_number, row in enumerate(rows, start=1):
             (source_id, path, digest, modified_ns, extraction, summary, topic, maturity, authority,
-             reason, classification_confidence, review_route, route_reasons) = row
+             reason, classification_confidence, review_route, route_reasons,
+             relationship_candidates) = row
             value = {column: "" for column in REVIEW_COLUMNS}
             value.update(defaults); value.update({"batch_id": batch_id, "source_id": source_id,
                 "source_path": path, "source_sha256": digest, "modified_ns": modified_ns,
                 "extraction_status": extraction, "model_summary": summary, "proposed_topic": topic,
                 "proposed_maturity": maturity, "proposed_authority": authority, "proposal_reason": reason,
                 "classification_confidence": classification_confidence,
-                "review_route": review_route, "route_reasons": route_reasons})
+                "review_route": review_route, "route_reasons": route_reasons,
+                "relationship_candidates": relationship_candidates})
             for column, name in enumerate(REVIEW_COLUMNS): sheet.write(row_number, column, value[name], wrap)
         sheet.set_column(0, 1, 18); sheet.set_column(2, 2, 52); sheet.set_column(3, 4, 18)
         sheet.set_column(5, len(REVIEW_COLUMNS)-1, 20)
@@ -298,24 +334,25 @@ def export_review_xlsx(database: sqlite3.Connection, batch_id: str, output: Path
         queue_sheet.hide_gridlines(2); queue_sheet.freeze_panes(1, 1)
         queue_columns = ("source_path", "model_summary", "proposed_topic", "proposed_maturity",
                          "classification_confidence", "review_route", "route_reasons",
-                         "selection_basis", "decision", "review_note", "reviewer")
+                         "relationship_candidates", "selection_basis", "decision", "review_note", "reviewer")
         for column, name in enumerate(queue_columns):
             queue_sheet.write(0, column, name, header)
         spot_source = next((row[0] for row in rows if row[11] == "SPOT_CHECK_ELIGIBLE"), None)
         queue_rows = [row for row in rows if row[11] != "SPOT_CHECK_ELIGIBLE" or row[0] == spot_source]
         for row_number, row in enumerate(queue_rows, start=1):
             (source_id, path, _digest, _modified_ns, _extraction, summary, topic, maturity,
-             _authority, _reason, classification_confidence, review_route, route_reasons) = row
+             _authority, _reason, classification_confidence, review_route, route_reasons,
+             relationship_candidates) = row
             selection_basis = ("QUALITY_CONTROL_SAMPLE" if source_id == spot_source and
                                review_route == "SPOT_CHECK_ELIGIBLE" else "EXCEPTION")
             values = (path, summary, topic, maturity, classification_confidence, review_route,
-                      route_reasons, selection_basis, "", "", "")
+                      route_reasons, relationship_candidates, selection_basis, "", "", "")
             for column, value in enumerate(values):
                 queue_sheet.write(row_number, column, value, wrap)
         queue_sheet.autofilter(0, 0, len(queue_rows), len(queue_columns) - 1)
         queue_sheet.set_column(0, 0, 46); queue_sheet.set_column(1, 1, 58)
         queue_sheet.set_column(2, 3, 24); queue_sheet.set_column(4, 4, 14)
-        queue_sheet.set_column(5, 7, 28); queue_sheet.set_column(8, 10, 22)
+        queue_sheet.set_column(5, 8, 28); queue_sheet.set_column(9, 11, 22)
         if queue_rows:
             decision_column = queue_columns.index("decision")
             queue_sheet.data_validation(1, decision_column, len(queue_rows), decision_column,
@@ -423,6 +460,57 @@ def store_candidates(database: sqlite3.Connection, batch_id: str,
         )
     database.commit()
     return stored
+
+
+def store_relationships(database: sqlite3.Connection, batch_id: str,
+                        relationships: list[dict[str, object]]) -> int:
+    stored = 0
+    for relationship in relationships:
+        source_id = str(relationship.get("source_id", ""))
+        bound = database.execute(
+            "SELECT 1 FROM review_batch_items WHERE batch_id=? AND source_id=?",
+            (batch_id, source_id),
+        ).fetchone()
+        if not bound:
+            raise ValueError("Relationship source is not bound to this batch")
+        relationship_type = str(relationship.get("relationship_type", ""))
+        if relationship_type not in RELATIONSHIP_TYPES:
+            raise ValueError("Relationship type is invalid")
+        related_path = str(relationship.get("related_relative_path", ""))
+        related_sha256 = str(relationship.get("related_sha256", ""))
+        evidence = str(relationship.get("evidence", ""))
+        confidence = float(relationship.get("confidence", 0.0))
+        if not related_path or len(related_sha256) != 64 or not evidence:
+            raise ValueError("Relationship evidence is incomplete")
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError("Relationship confidence is invalid")
+        value = {"source_id": source_id, "batch_id": batch_id,
+                 "relationship_type": relationship_type,
+                 "related_relative_path": related_path,
+                 "related_sha256": related_sha256, "confidence": confidence,
+                 "evidence": evidence, "authority": "NONE"}
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        relationship_id = hashlib.sha256(
+            ("SOVEREIGN_WORKBENCH_RELATIONSHIP_V1\0" + canonical).encode()
+        ).hexdigest()
+        cursor = database.execute(
+            "INSERT OR IGNORE INTO archive_review_relationships VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (relationship_id, source_id, batch_id, relationship_type, related_path,
+             related_sha256, confidence, evidence, "NONE", _now()),
+        )
+        stored += cursor.rowcount
+    database.commit()
+    return stored
+
+
+def relationship_counts(database: sqlite3.Connection) -> dict[str, int]:
+    result = {relationship_type: 0 for relationship_type in RELATIONSHIP_TYPES}
+    for relationship_type, count in database.execute(
+        "SELECT relationship_type,COUNT(*) FROM archive_review_relationships "
+        "GROUP BY relationship_type"
+    ):
+        result[relationship_type] = count
+    return result
 
 
 def import_review_csv(database: sqlite3.Connection, path: Path) -> int:

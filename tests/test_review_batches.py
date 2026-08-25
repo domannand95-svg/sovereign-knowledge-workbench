@@ -9,7 +9,7 @@ import pytest
 from sovereign_workbench.intake import scan_files
 from sovereign_workbench.review_batches import (admit, connect, counts, create_next, export_review_csv,
     import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
-    export_training_split, routing_counts)
+    export_training_split, relationship_counts, routing_counts, store_relationships)
 
 
 def make_files(root: Path, count: int) -> None:
@@ -163,6 +163,29 @@ def test_blank_review_rows_require_no_human_decision(tmp_path: Path):
             rows = list(csv.DictReader(stream))
         assert all(row["decision"] == "" for row in rows)
         assert import_review_csv(database, output) == 0
+
+
+def test_relationship_evidence_is_immutable_inert_and_exported(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 1)
+    output = tmp_path / "review.csv"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        item = batch["items"][0]
+        relationship = {
+            "source_id": item["source_id"], "relationship_type": "POSSIBLE_PARENT",
+            "related_relative_path": "parent.txt", "related_sha256": "f" * 64,
+            "confidence": 0.8, "evidence": "filename-token similarity",
+        }
+        assert store_relationships(database, batch["batch_id"], [relationship]) == 1
+        assert store_relationships(database, batch["batch_id"], [relationship]) == 0
+        assert relationship_counts(database)["POSSIBLE_PARENT"] == 1
+        assert database.execute(
+            "SELECT authority FROM archive_review_relationships"
+        ).fetchone()[0] == "NONE"
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            database.execute("DELETE FROM archive_review_relationships")
+        export_review_csv(database, batch["batch_id"], output)
+        assert "parent.txt" in output.read_text(encoding="utf-8-sig")
 
 
 def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path):

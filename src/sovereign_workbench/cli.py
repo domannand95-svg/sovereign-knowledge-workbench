@@ -18,14 +18,16 @@ from .staging import (StagingError, build_plan as build_stage_plan, connect as c
                       status_counts as staging_status_counts)
 from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
                              counts as review_batch_counts, create_next as create_review_batch,
-                             export_review_csv, export_review_xlsx, import_review_csv, routing_counts,
-                             store_candidates)
+                             export_review_csv, export_review_xlsx, import_review_csv,
+                             relationship_counts, routing_counts, store_candidates,
+                             store_relationships)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
 from .taxonomy import load_taxonomy
 from .local_model import LocalModelConfig, classify_with_local_model
+from .relationships import detect_relationships
 
 
 def _select_manifest_records(root: Path, records: list, manifest_path: Path) -> list:
@@ -234,14 +236,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "archive-batch-create":
             suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}
-            records = scan_files(args.root, max_file_bytes=args.max_file_mb * 1024 * 1024,
-                                 include_suffixes=suffixes)
+            corpus_records = scan_files(args.root, max_file_bytes=args.max_file_mb * 1024 * 1024,
+                                        include_suffixes=suffixes)
+            records = corpus_records
             if args.selection_manifest:
                 records = _select_manifest_records(args.root, records, args.selection_manifest)
             with connect_review_batches(args.state_db) as database:
                 admitted = admit_review_sources(database, args.root, records)
                 batch = create_review_batch(database, limit=args.limit)
                 candidate_count = 0
+                relationship_count = 0
                 if batch:
                     taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
                     local_model_config = LocalModelConfig.from_environment() if args.local_model else None
@@ -271,9 +275,18 @@ def main(argv: list[str] | None = None) -> int:
                             },
                             "risk_flags": [finding.kind for finding in privacy_findings(record)]})
                     candidate_count = store_candidates(database, batch["batch_id"], candidates)
+                    selected_records = [
+                        (item["source_id"], by_path[item["relative_path"]]) for item in batch["items"]
+                    ]
+                    relationship_count = store_relationships(
+                        database, batch["batch_id"],
+                        detect_relationships(selected_records, corpus_records),
+                    )
                 print(json.dumps({"admitted": admitted, "candidates": candidate_count,
+                    "relationships": relationship_count,
                     "batch": batch, "status": review_batch_counts(database),
-                    "routing": routing_counts(database)}, sort_keys=True))
+                    "routing": routing_counts(database),
+                    "relationship_counts": relationship_counts(database)}, sort_keys=True))
             return 0
         if args.command == "archive-batch-export":
             with connect_review_batches(args.state_db) as database:
@@ -288,7 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "archive-batch-status":
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps({"status": review_batch_counts(database),
-                                  "routing": routing_counts(database)}, sort_keys=True))
+                                  "routing": routing_counts(database),
+                                  "relationship_counts": relationship_counts(database)}, sort_keys=True))
             return 0
         if args.command == "archive-research-export":
             with connect_review_batches(args.state_db) as database:
