@@ -1,0 +1,22 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Sovereign Workbench Companion", "version": "1.0.0"},
+  "servers": [{"url": "http://127.0.0.1:8765"}],
+  "x-governance": {"contractVersion": "sovereign.workbench.companion.v1", "authority": "none", "browserReceiptsAllowed": false, "executionAuthorization": "local-companion-only", "sourceMutationAllowed": false},
+  "components": {
+    "securitySchemes": {"companionToken": {"type": "http", "scheme": "bearer"}},
+    "schemas": {
+      "PlanRequest": {"type": "object", "additionalProperties": false, "required": ["source_path", "staging_root"], "properties": {"source_path": {"type": "string", "minLength": 1}, "staging_root": {"type": "string", "minLength": 1}, "max_bytes": {"type": "integer", "minimum": 1, "maximum": 1073741824}}},
+      "EmptyAuthorityRequest": {"type": "object", "additionalProperties": false, "maxProperties": 0, "description": "Receipts and authority claims are forbidden at the browser boundary."}
+    }
+  },
+  "security": [{"companionToken": []}],
+  "paths": {
+    "/v1/health": {"get": {"operationId": "health", "responses": {"200": {"description": "Loopback companion status"}}}},
+    "/v1/reviews": {"get": {"operationId": "reviews", "responses": {"200": {"description": "Read-only review candidates"}}}},
+    "/v1/staging/status": {"get": {"operationId": "stagingStatus", "responses": {"200": {"description": "Read-only staging counts"}}}},
+    "/v1/staging/plans": {"post": {"operationId": "createPlan", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PlanRequest"}}}}, "responses": {"201": {"description": "Inert server-held preview"}}}},
+    "/v1/staging/plans/{plan_id}/execute": {"post": {"operationId": "executePlan", "parameters": [{"in": "path", "name": "plan_id", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EmptyAuthorityRequest"}}}}, "responses": {"200": {"description": "Separately authorized local staging"}}}},
+    "/v1/staging/plans/{plan_id}/rollback": {"post": {"operationId": "rollbackPlan", "parameters": [{"in": "path", "name": "plan_id", "required": true, "schema": {"type": "string"}}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EmptyAuthorityRequest"}}}}, "responses": {"200": {"description": "Separately authorized local rollback"}}}}
+  }
+}
