@@ -194,6 +194,12 @@ receipt inside the local process. A browser-supplied receipt is rejected. Run
 same localhost-only defaults; edit its arguments before use if your database or
 Base44 development origin differs.
 
+Use `.\scripts\companion-status.ps1` for an authenticated health check,
+`.\scripts\stop-companion.ps1` for PID-verified shutdown, and
+`.\scripts\uninstall-companion-launcher.ps1` to remove only the desktop
+shortcut. See `docs/OPERATOR_GUIDE.md`, `docs/SECURITY.md`, and
+`docs/RELEASE_CHECKLIST.md` before a release or any non-synthetic pilot.
+
 ## BKI validation
 
 ```powershell
