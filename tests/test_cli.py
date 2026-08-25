@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import hashlib
 import json
 
 from sovereign_workbench.cli import main
@@ -56,3 +57,35 @@ def test_archive_batch_cli_resumes_and_exports_without_overwrite(tmp_path: Path,
     assert output.exists()
     assert main(["archive-batch-export", first["batch"]["batch_id"], "--state-db", str(state), "--output", str(output)]) == 3
     assert "never overwritten" in capsys.readouterr().err
+
+
+def test_archive_selection_manifest_admits_only_hash_bound_items(tmp_path: Path, capsys):
+    source = tmp_path / "source"; source.mkdir()
+    selected = source / "selected.txt"; selected.write_text("selected", encoding="utf-8")
+    (source / "excluded.txt").write_text("excluded", encoding="utf-8")
+    manifest = tmp_path / "selection.json"
+    manifest.write_text(json.dumps({
+        "contract_version": "sovereign.workbench.archive-selection.v1",
+        "root": str(source.resolve()),
+        "items": [{"relative_path": "selected.txt",
+                   "sha256": hashlib.sha256(selected.read_bytes()).hexdigest()}],
+    }), encoding="utf-8")
+    assert main(["archive-batch-create", str(source), "--state-db", str(tmp_path / "review.db"),
+                 "--include", ".txt", "--selection-manifest", str(manifest)]) == 0
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["admitted"] == 1
+    assert [item["relative_path"] for item in outcome["batch"]["items"]] == ["selected.txt"]
+
+
+def test_archive_selection_manifest_rejects_hash_mismatch(tmp_path: Path, capsys):
+    source = tmp_path / "source"; source.mkdir()
+    (source / "selected.txt").write_text("selected", encoding="utf-8")
+    manifest = tmp_path / "selection.json"
+    manifest.write_text(json.dumps({
+        "contract_version": "sovereign.workbench.archive-selection.v1",
+        "root": str(source.resolve()),
+        "items": [{"relative_path": "selected.txt", "sha256": "0" * 64}],
+    }), encoding="utf-8")
+    assert main(["archive-batch-create", str(source), "--state-db", str(tmp_path / "review.db"),
+                 "--include", ".txt", "--selection-manifest", str(manifest)]) == 3
+    assert "identity mismatch" in capsys.readouterr().err

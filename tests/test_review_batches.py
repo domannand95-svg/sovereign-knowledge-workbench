@@ -9,7 +9,7 @@ import pytest
 from sovereign_workbench.intake import scan_files
 from sovereign_workbench.review_batches import (admit, connect, counts, create_next, export_review_csv,
     import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
-    export_training_split)
+    export_training_split, routing_counts)
 
 
 def make_files(root: Path, count: int) -> None:
@@ -109,6 +109,62 @@ def test_candidate_population_is_immutable_and_exported(tmp_path: Path):
         assert "Bounded summary" in output.read_text(encoding="utf-8-sig")
 
 
+def test_exception_routing_separates_spot_check_manual_and_recovery(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir()
+    (source / "eligible.txt").write_text("Research evidence with a clear scope", encoding="utf-8")
+    (source / "uncertain.txt").write_text("Unclear material", encoding="utf-8")
+    (source / "broken.docx").write_text("not a zip archive", encoding="utf-8")
+    with connect(tmp_path / "state.db") as database:
+        records = scan_files(source, include_suffixes={".txt", ".docx"})
+        admit(database, source, records); batch = create_next(database)
+        candidates = []
+        for item in batch["items"]:
+            name = item["relative_path"]
+            candidates.append({
+                "source_id": item["source_id"],
+                "model_summary": "Bounded candidate summary",
+                "proposed_topic": "research",
+                "proposed_maturity": "research",
+                "proposed_authority": "non_authoritative_candidate",
+                "proposal_reason": "test candidate",
+                "classification_confidence": 0.91 if name == "eligible.txt" else 0.4,
+                "classification_abstained": name == "uncertain.txt",
+                "risk_flags": ["phone_number"] if name == "eligible.txt" else [],
+            })
+        assert store_candidates(database, batch["batch_id"], candidates) == 3
+        assert routing_counts(database) == {
+            "SPOT_CHECK_ELIGIBLE": 1,
+            "MANUAL_REVIEW_REQUIRED": 1,
+            "RECOVERY_REQUIRED": 1,
+        }
+        routes = dict(database.execute(
+            "SELECT s.relative_path,r.review_route FROM archive_review_routes r "
+            "JOIN review_sources s ON s.source_id=r.source_id"
+        ))
+        assert routes["eligible.txt"] == "SPOT_CHECK_ELIGIBLE"
+        assert routes["uncertain.txt"] == "MANUAL_REVIEW_REQUIRED"
+        assert routes["broken.docx"] == "RECOVERY_REQUIRED"
+        reason = database.execute(
+            "SELECT route_reasons FROM archive_review_routes r JOIN review_sources s "
+            "ON s.source_id=r.source_id WHERE s.relative_path='eligible.txt'"
+        ).fetchone()[0]
+        assert "external disclosure remains blocked: phone_number" in reason
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            database.execute("UPDATE archive_review_routes SET review_route='MANUAL_REVIEW_REQUIRED'")
+
+
+def test_blank_review_rows_require_no_human_decision(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 2)
+    output = tmp_path / "review.csv"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        export_review_csv(database, batch["batch_id"], output)
+        with output.open(encoding="utf-8-sig", newline="") as stream:
+            rows = list(csv.DictReader(stream))
+        assert all(row["decision"] == "" for row in rows)
+        assert import_review_csv(database, output) == 0
+
+
 def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path):
     source = tmp_path / "source"; source.mkdir(); make_files(source, 20)
     review = tmp_path / "review.csv"
@@ -150,5 +206,7 @@ def test_formatted_excel_export_is_valid_and_non_overwriting(tmp_path: Path):
         with zipfile.ZipFile(output) as archive:
             assert "xl/workbook.xml" in archive.namelist()
             assert b"Review Ledger" in archive.read("xl/workbook.xml")
+            assert b"Review Queue" in archive.read("xl/workbook.xml")
+            assert b"Instructions" in archive.read("xl/workbook.xml")
         with pytest.raises(ValueError, match="never overwritten"):
             export_review_xlsx(database, batch["batch_id"], output)

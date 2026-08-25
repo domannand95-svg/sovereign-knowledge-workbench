@@ -66,6 +66,19 @@ CREATE TABLE IF NOT EXISTS archive_review_candidates (
   proposal_reason TEXT NOT NULL,
   candidate_sha256 TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS archive_review_routes (
+  source_id TEXT PRIMARY KEY REFERENCES review_sources(source_id),
+  batch_id TEXT NOT NULL REFERENCES review_batches(batch_id),
+  review_route TEXT NOT NULL CHECK(review_route IN (
+    'SPOT_CHECK_ELIGIBLE','MANUAL_REVIEW_REQUIRED','RECOVERY_REQUIRED'
+  )),
+  route_reasons TEXT NOT NULL,
+  classification_confidence REAL NOT NULL CHECK(
+    classification_confidence >= 0.0 AND classification_confidence <= 1.0
+  ),
+  route_sha256 TEXT NOT NULL,
+  generated_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS review_batches_no_update
   BEFORE UPDATE ON review_batches BEGIN SELECT RAISE(ABORT, 'review batches are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batches_no_delete
@@ -82,15 +95,21 @@ CREATE TRIGGER IF NOT EXISTS archive_review_candidates_no_update
   BEFORE UPDATE ON archive_review_candidates BEGIN SELECT RAISE(ABORT, 'archive review candidates are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_review_candidates_no_delete
   BEFORE DELETE ON archive_review_candidates BEGIN SELECT RAISE(ABORT, 'archive review candidates are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_review_routes_no_update
+  BEFORE UPDATE ON archive_review_routes BEGIN SELECT RAISE(ABORT, 'archive review routes are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_review_routes_no_delete
+  BEFORE DELETE ON archive_review_routes BEGIN SELECT RAISE(ABORT, 'archive review routes are immutable'); END;
 """
 
 TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
 MATURITIES = {"Production", "Normative specification", "Proposed specification", "Research", "Evidence", "Handover", "Archive", "Needs review"}
 AUTHORITIES = {"Implemented authority boundary", "Non-authoritative candidate", "No authority", "Needs review"}
 DECISIONS = {"APPROVE", "REJECT", "NEEDS_RESEARCH", "QUARANTINE"}
+REVIEW_ROUTES = {"SPOT_CHECK_ELIGIBLE", "MANUAL_REVIEW_REQUIRED", "RECOVERY_REQUIRED"}
 REVIEW_COLUMNS = (
     "batch_id", "source_id", "source_path", "source_sha256", "modified_ns", "extraction_status",
     "model_summary", "proposed_topic", "proposed_maturity", "proposed_authority", "proposal_reason",
+    "classification_confidence", "review_route", "route_reasons",
     "decision", "topic", "maturity", "authority", "confidence", "privacy_status",
     "canonical_status", "review_note", "supersedes", "replaced_by", "research_question", "reviewer",
 )
@@ -182,31 +201,50 @@ def counts(database: sqlite3.Connection) -> dict[str, int]:
     return result
 
 
+def routing_counts(database: sqlite3.Connection) -> dict[str, int]:
+    result = {route: 0 for route in REVIEW_ROUTES}
+    for route, count in database.execute(
+        "SELECT review_route,COUNT(*) FROM archive_review_routes GROUP BY review_route"
+    ):
+        result[route] = count
+    return result
+
+
+def _review_rows(database: sqlite3.Connection, batch_id: str) -> list[tuple[object, ...]]:
+    return database.execute(
+        "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status,"
+        "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
+        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,''),"
+        "COALESCE(r.classification_confidence,0.0),COALESCE(r.review_route,'MANUAL_REVIEW_REQUIRED'),"
+        "COALESCE(r.route_reasons,'candidate routing is unavailable') "
+        "FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
+        "LEFT JOIN archive_review_candidates c ON c.source_id=s.source_id "
+        "LEFT JOIN archive_review_routes r ON r.source_id=s.source_id "
+        "WHERE i.batch_id=? ORDER BY i.ordinal", (batch_id,),
+    ).fetchall()
+
+
 def export_review_csv(database: sqlite3.Connection, batch_id: str, output: Path) -> Path:
     if output.exists():
         raise ValueError("Review export already exists; prior exports are never overwritten")
-    rows = database.execute(
-        "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status,"
-        "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
-        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,'') "
-        "FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
-        "LEFT JOIN archive_review_candidates c ON c.source_id=s.source_id "
-        "WHERE i.batch_id=? ORDER BY i.ordinal", (batch_id,),
-    ).fetchall()
+    rows = _review_rows(database, batch_id)
     if not rows:
         raise ValueError("Unknown or empty review batch")
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=REVIEW_COLUMNS)
         writer.writeheader()
-        for source_id, path, digest, modified_ns, extraction_status, summary, topic, maturity, authority, reason in rows:
+        for (source_id, path, digest, modified_ns, extraction_status, summary, topic, maturity,
+             authority, reason, classification_confidence, review_route, route_reasons) in rows:
             value = {column: "" for column in REVIEW_COLUMNS}
             value.update({"batch_id": batch_id, "source_id": source_id, "source_path": path,
                           "source_sha256": digest, "modified_ns": modified_ns,
-                          "extraction_status": extraction_status, "decision": "NEEDS_RESEARCH",
+                          "extraction_status": extraction_status,
                           "model_summary": summary, "proposed_topic": topic,
                           "proposed_maturity": maturity, "proposed_authority": authority,
                           "proposal_reason": reason,
+                          "classification_confidence": classification_confidence,
+                          "review_route": review_route, "route_reasons": route_reasons,
                           "topic": "Needs review", "maturity": "Needs review",
                           "authority": "Needs review", "confidence": "UNKNOWN",
                           "privacy_status": "Needs review", "canonical_status": "UNRESOLVED"})
@@ -221,14 +259,7 @@ def export_review_xlsx(database: sqlite3.Connection, batch_id: str, output: Path
         import xlsxwriter
     except ImportError as exc:
         raise ValueError("Excel export requires installation with the 'excel' extra") from exc
-    rows = database.execute(
-        "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status,"
-        "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
-        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,'') "
-        "FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
-        "LEFT JOIN archive_review_candidates c ON c.source_id=s.source_id "
-        "WHERE i.batch_id=? ORDER BY i.ordinal", (batch_id,),
-    ).fetchall()
+    rows = _review_rows(database, batch_id)
     if not rows:
         raise ValueError("Unknown or empty review batch")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -240,30 +271,72 @@ def export_review_xlsx(database: sqlite3.Connection, batch_id: str, output: Path
         wrap = workbook.add_format({"text_wrap": True, "valign": "top"})
         sheet.hide_gridlines(2); sheet.freeze_panes(1, 1); sheet.autofilter(0, 0, len(rows), len(REVIEW_COLUMNS)-1)
         for column, name in enumerate(REVIEW_COLUMNS): sheet.write(0, column, name, header)
-        defaults = {"decision": "NEEDS_RESEARCH", "topic": "Needs review", "maturity": "Needs review",
+        defaults = {"decision": "", "topic": "Needs review", "maturity": "Needs review",
                     "authority": "Needs review", "confidence": "UNKNOWN", "privacy_status": "Needs review",
                     "canonical_status": "UNRESOLVED"}
         for row_number, row in enumerate(rows, start=1):
-            source_id, path, digest, modified_ns, extraction, summary, topic, maturity, authority, reason = row
+            (source_id, path, digest, modified_ns, extraction, summary, topic, maturity, authority,
+             reason, classification_confidence, review_route, route_reasons) = row
             value = {column: "" for column in REVIEW_COLUMNS}
             value.update(defaults); value.update({"batch_id": batch_id, "source_id": source_id,
                 "source_path": path, "source_sha256": digest, "modified_ns": modified_ns,
                 "extraction_status": extraction, "model_summary": summary, "proposed_topic": topic,
-                "proposed_maturity": maturity, "proposed_authority": authority, "proposal_reason": reason})
+                "proposed_maturity": maturity, "proposed_authority": authority, "proposal_reason": reason,
+                "classification_confidence": classification_confidence,
+                "review_route": review_route, "route_reasons": route_reasons})
             for column, name in enumerate(REVIEW_COLUMNS): sheet.write(row_number, column, value[name], wrap)
         sheet.set_column(0, 1, 18); sheet.set_column(2, 2, 52); sheet.set_column(3, 4, 18)
         sheet.set_column(5, len(REVIEW_COLUMNS)-1, 20)
-        last = len(rows) + 1
-        sheet.data_validation(f"L2:L{last}", {"validate": "list", "source": sorted(DECISIONS)})
-        sheet.data_validation(f"M2:M{last}", {"validate": "list", "source": sorted(TOPICS)})
-        sheet.data_validation(f"N2:N{last}", {"validate": "list", "source": sorted(MATURITIES)})
-        sheet.data_validation(f"O2:O{last}", {"validate": "list", "source": sorted(AUTHORITIES)})
-        sheet.data_validation(f"P2:P{last}", {"validate": "list", "source": ["HIGH", "MEDIUM", "LOW", "UNKNOWN"]})
+        last_row = len(rows)
+        for name, values in (("decision", sorted(DECISIONS)), ("topic", sorted(TOPICS)),
+                             ("maturity", sorted(MATURITIES)), ("authority", sorted(AUTHORITIES)),
+                             ("confidence", ["HIGH", "MEDIUM", "LOW", "UNKNOWN"])):
+            column = REVIEW_COLUMNS.index(name)
+            sheet.data_validation(1, column, last_row, column,
+                                  {"validate": "list", "source": values})
+        queue_sheet = workbook.add_worksheet("Review Queue")
+        queue_sheet.hide_gridlines(2); queue_sheet.freeze_panes(1, 1)
+        queue_columns = ("source_path", "model_summary", "proposed_topic", "proposed_maturity",
+                         "classification_confidence", "review_route", "route_reasons",
+                         "selection_basis", "decision", "review_note", "reviewer")
+        for column, name in enumerate(queue_columns):
+            queue_sheet.write(0, column, name, header)
+        spot_source = next((row[0] for row in rows if row[11] == "SPOT_CHECK_ELIGIBLE"), None)
+        queue_rows = [row for row in rows if row[11] != "SPOT_CHECK_ELIGIBLE" or row[0] == spot_source]
+        for row_number, row in enumerate(queue_rows, start=1):
+            (source_id, path, _digest, _modified_ns, _extraction, summary, topic, maturity,
+             _authority, _reason, classification_confidence, review_route, route_reasons) = row
+            selection_basis = ("QUALITY_CONTROL_SAMPLE" if source_id == spot_source and
+                               review_route == "SPOT_CHECK_ELIGIBLE" else "EXCEPTION")
+            values = (path, summary, topic, maturity, classification_confidence, review_route,
+                      route_reasons, selection_basis, "", "", "")
+            for column, value in enumerate(values):
+                queue_sheet.write(row_number, column, value, wrap)
+        queue_sheet.autofilter(0, 0, len(queue_rows), len(queue_columns) - 1)
+        queue_sheet.set_column(0, 0, 46); queue_sheet.set_column(1, 1, 58)
+        queue_sheet.set_column(2, 3, 24); queue_sheet.set_column(4, 4, 14)
+        queue_sheet.set_column(5, 7, 28); queue_sheet.set_column(8, 10, 22)
+        if queue_rows:
+            decision_column = queue_columns.index("decision")
+            queue_sheet.data_validation(1, decision_column, len(queue_rows), decision_column,
+                                        {"validate": "list", "source": sorted(DECISIONS)})
+            route_column = queue_columns.index("review_route")
+            queue_sheet.conditional_format(1, route_column, len(queue_rows), route_column,
+                {"type": "text", "criteria": "containing", "value": "RECOVERY_REQUIRED",
+                 "format": workbook.add_format({"bg_color": "#F4CCCC", "font_color": "#9C0006"})})
+            queue_sheet.conditional_format(1, route_column, len(queue_rows), route_column,
+                {"type": "text", "criteria": "containing", "value": "MANUAL_REVIEW_REQUIRED",
+                 "format": workbook.add_format({"bg_color": "#FFF2CC", "font_color": "#7F6000"})})
+            queue_sheet.conditional_format(1, route_column, len(queue_rows), route_column,
+                {"type": "text", "criteria": "containing", "value": "SPOT_CHECK_ELIGIBLE",
+                 "format": workbook.add_format({"bg_color": "#D9EAD3", "font_color": "#274E13"})})
         summary_sheet = workbook.add_worksheet("Instructions")
         summary_sheet.hide_gridlines(2); summary_sheet.set_column("A:A", 28); summary_sheet.set_column("B:B", 80)
         summary_sheet.write("A1", "Control", header); summary_sheet.write("B1", "Meaning", header)
         instructions = [("Authority", "Model and workbook outputs are candidates only."),
-                        ("Review", "Complete decision, topic, maturity, authority, confidence, privacy, canonical status, note, and reviewer."),
+                        ("Start here", "Use Review Queue instead of reading every row in the complete Review Ledger."),
+                        ("Routing", "Review RECOVERY_REQUIRED and MANUAL_REVIEW_REQUIRED rows; use SPOT_CHECK_ELIGIBLE only for a small quality-control sample."),
+                        ("Review", "Leave decision blank when no human decision is required. Complete decision fields only for selected rows."),
                         ("Research", "NEEDS_RESEARCH requires a precise research question before import."),
                         ("Files", "No source file is moved, renamed, deleted, or published by this workbook.")]
         for index, pair in enumerate(instructions, start=1):
@@ -273,11 +346,57 @@ def export_review_xlsx(database: sqlite3.Connection, batch_id: str, output: Path
     return output
 
 
-def store_candidates(database: sqlite3.Connection, batch_id: str, candidates: list[dict[str, str]]) -> int:
+def _route_candidate(extraction_status: str, candidate: dict[str, object]) -> tuple[str, list[str], float]:
+    try:
+        confidence = float(candidate.get("classification_confidence", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Classification confidence must be a number") from exc
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError("Classification confidence must be between zero and one")
+
+    if extraction_status != "extracted":
+        return "RECOVERY_REQUIRED", [f"extraction_status={extraction_status}"], confidence
+
+    reasons: list[str] = []
+    if str(candidate.get("classification_abstained", "false")).casefold() == "true":
+        reasons.append("classifier abstained or selected the fallback module")
+    if confidence < 0.75:
+        reasons.append("classification confidence is below 0.75")
+    if not str(candidate.get("model_summary", "")).strip():
+        reasons.append("summary is empty")
+    if str(candidate.get("proposed_maturity", "")).casefold() in {"", "unknown", "ambiguous"}:
+        reasons.append("maturity is unresolved")
+    risk_flags = candidate.get("risk_flags", [])
+    if isinstance(risk_flags, str):
+        try:
+            risk_flags = json.loads(risk_flags)
+        except json.JSONDecodeError as exc:
+            raise ValueError("risk_flags must be a JSON array or list") from exc
+    if not isinstance(risk_flags, list) or not all(isinstance(flag, str) for flag in risk_flags):
+        raise ValueError("risk_flags must be a JSON array or list of strings")
+    high_risk_flags = sorted(set(risk_flags) & {
+        "payment_card_candidate", "australian_tax_file_number_candidate"
+    })
+    disclosure_flags = sorted(set(risk_flags) - set(high_risk_flags))
+    if high_risk_flags:
+        reasons.append("high-risk privacy candidate: " + ", ".join(high_risk_flags))
+    if reasons:
+        return "MANUAL_REVIEW_REQUIRED", reasons, confidence
+    spot_reasons = ["no deterministic review exception matched"]
+    if disclosure_flags:
+        spot_reasons.append("external disclosure remains blocked: " + ", ".join(disclosure_flags))
+    return "SPOT_CHECK_ELIGIBLE", spot_reasons, confidence
+
+
+def store_candidates(database: sqlite3.Connection, batch_id: str,
+                     candidates: list[dict[str, object]]) -> int:
     stored = 0
     for candidate in candidates:
-        bound = database.execute("SELECT 1 FROM review_batch_items WHERE batch_id=? AND source_id=?",
-                                 (batch_id, candidate["source_id"])).fetchone()
+        bound = database.execute(
+            "SELECT s.extraction_status FROM review_batch_items i "
+            "JOIN review_sources s ON s.source_id=i.source_id "
+            "WHERE i.batch_id=? AND i.source_id=?", (batch_id, candidate["source_id"]),
+        ).fetchone()
         if not bound:
             raise ValueError("Candidate is not bound to this batch")
         value = {key: str(candidate.get(key, "")) for key in
@@ -291,6 +410,17 @@ def store_candidates(database: sqlite3.Connection, batch_id: str, candidates: li
              value["proposed_maturity"], value["proposed_authority"], value["proposal_reason"], digest),
         )
         stored += cursor.rowcount
+        route, reasons, confidence = _route_candidate(bound[0], candidate)
+        route_value = {"source_id": value["source_id"], "batch_id": batch_id,
+                       "candidate_sha256": digest, "review_route": route,
+                       "route_reasons": reasons, "classification_confidence": confidence}
+        route_canonical = json.dumps(route_value, sort_keys=True, separators=(",", ":"))
+        route_digest = hashlib.sha256(route_canonical.encode()).hexdigest()
+        database.execute(
+            "INSERT OR IGNORE INTO archive_review_routes VALUES(?,?,?,?,?,?,?)",
+            (value["source_id"], batch_id, route, json.dumps(reasons, separators=(",", ":")),
+             confidence, route_digest, _now()),
+        )
     database.commit()
     return stored
 
@@ -305,6 +435,14 @@ def import_review_csv(database: sqlite3.Connection, path: Path) -> int:
     database.execute("BEGIN IMMEDIATE")
     try:
         for row in rows:
+            bound = database.execute(
+                "SELECT s.source_sha256 FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
+                "WHERE i.batch_id=? AND i.source_id=?", (row["batch_id"], row["source_id"]),
+            ).fetchone()
+            if not bound or bound[0] != row["source_sha256"]:
+                raise ValueError("Review row source identity mismatch")
+            if not row["decision"].strip():
+                continue
             if row["decision"] not in DECISIONS or row["topic"] not in TOPICS or row["maturity"] not in MATURITIES or row["authority"] not in AUTHORITIES:
                 raise ValueError("Review row contains an invalid controlled value")
             if row["confidence"] not in {"HIGH", "MEDIUM", "LOW", "UNKNOWN"}:
@@ -313,12 +451,6 @@ def import_review_csv(database: sqlite3.Connection, path: Path) -> int:
                 raise ValueError("Reviewer and review_note are required")
             if row["decision"] == "NEEDS_RESEARCH" and not row["research_question"].strip():
                 raise ValueError("NEEDS_RESEARCH requires a research question")
-            bound = database.execute(
-                "SELECT s.source_sha256 FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
-                "WHERE i.batch_id=? AND i.source_id=?", (row["batch_id"], row["source_id"]),
-            ).fetchone()
-            if not bound or bound[0] != row["source_sha256"]:
-                raise ValueError("Review row source identity mismatch")
             canonical = json.dumps({key: row[key] for key in REVIEW_COLUMNS}, sort_keys=True, separators=(",", ":"))
             decision_id = hashlib.sha256(("SOVEREIGN_WORKBENCH_ARCHIVE_REVIEW_V1\0" + canonical).encode()).hexdigest()
             cursor = database.execute(
