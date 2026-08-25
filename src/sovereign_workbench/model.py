@@ -48,6 +48,8 @@ class WorkbenchReport:
     contract_version: str
     root: str
     generated_at_utc: str
+    taxonomy_contract: str | None = None
+    taxonomy_sha256: str | None = None
     files: list[FileRecord] = field(default_factory=list)
     duplicate_groups: list[list[str]] = field(default_factory=list)
     classifications: dict[str, Classification] = field(default_factory=dict)
