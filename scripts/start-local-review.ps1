@@ -18,4 +18,4 @@ if ([string]::IsNullOrWhiteSpace($Reviewer)) {
     throw "A human reviewer name is required."
 }
 
-& $python -m sovereign_workbench.local_review --state-db $statePath --reviewer $Reviewer
+& $python -m sovereign_workbench.local_review_web --state-db $statePath --reviewer $Reviewer
