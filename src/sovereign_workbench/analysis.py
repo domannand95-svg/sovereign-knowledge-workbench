@@ -31,7 +31,10 @@ RESEARCH_CUES = (
 def classify(record: FileRecord, taxonomy: Taxonomy | None = None) -> Classification:
     text = (record.extracted_text or "").casefold()
     rules = taxonomy.modules if taxonomy else MODULE_RULES
-    scores = {module: sum(text.count(term) for term in terms) for module, terms in rules.items()}
+    scores = {
+        module: sum(len(re.findall(rf"(?<!\w){re.escape(term)}(?!\w)", text)) for term in terms)
+        for module, terms in rules.items()
+    }
     module, score = max(scores.items(), key=lambda item: (item[1], item[0]))
     if score == 0:
         module = taxonomy.fallback_module if taxonomy else "unclassified"

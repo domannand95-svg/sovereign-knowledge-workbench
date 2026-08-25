@@ -18,6 +18,7 @@ class LocalModelConfig:
     endpoint: str
     model: str
     timeout_seconds: int = 120
+    max_content_chars: int = 20_000
 
     @classmethod
     def from_environment(cls) -> "LocalModelConfig":
@@ -25,6 +26,7 @@ class LocalModelConfig:
             endpoint=os.environ.get("SKW_MODEL_ENDPOINT", "http://127.0.0.1:11434/v1/chat/completions"),
             model=os.environ.get("SKW_MODEL_NAME", ""),
             timeout_seconds=int(os.environ.get("SKW_MODEL_TIMEOUT", "120")),
+            max_content_chars=int(os.environ.get("SKW_MODEL_MAX_CHARS", "20000")),
         )
 
 
@@ -36,6 +38,8 @@ def classify_with_local_model(
 ) -> Classification:
     if not config.model:
         raise ModelError("SKW_MODEL_NAME is required for model classification")
+    if not 1_000 <= config.max_content_chars <= 20_000:
+        raise ModelError("Model content ceiling must be between 1000 and 20000 characters")
     modules = allowed_modules or [
         "governance", "research", "evidence", "correspondence", "finance", "legal", "unclassified"
     ]
@@ -46,7 +50,7 @@ def classify_with_local_model(
         "required_json": {"module": "string", "confidence": "0..1", "labels": ["string"], "summary": "string"},
         "path": record.relative_path,
         "sha256": record.sha256,
-        "content": (record.extracted_text or "")[:20_000],
+        "content": (record.extracted_text or "")[:config.max_content_chars],
     }
     body = json.dumps({
         "model": config.model,

@@ -16,6 +16,45 @@ from .scheduler import connect_schedule, enqueue_schedule, load_workers, run_pen
 from .staging import (StagingError, build_plan as build_stage_plan, connect as connect_staging,
                       execute as execute_stage, recover as recover_staging, rollback as rollback_stage,
                       status_counts as staging_status_counts)
+from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
+                             counts as review_batch_counts, create_next as create_review_batch,
+                             export_review_csv, export_review_xlsx, import_review_csv,
+                             relationship_counts, routing_counts, store_candidates,
+                             store_relationships)
+from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
+from .intake import scan_files
+from .analysis import classify, privacy_findings
+from .epistemic import assess
+from .taxonomy import load_taxonomy
+from .local_model import LocalModelConfig, classify_with_local_model
+from .relationships import detect_relationships
+
+
+def _select_manifest_records(root: Path, records: list, manifest_path: Path) -> list:
+    value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or set(value) != {"contract_version", "root", "items"}:
+        raise ValueError("Archive selection manifest has missing or unexpected fields")
+    if value["contract_version"] != "sovereign.workbench.archive-selection.v1":
+        raise ValueError("Unsupported archive selection manifest")
+    if value["root"] != str(root.resolve(strict=True)):
+        raise ValueError("Archive selection root does not match the scanned root")
+    if not isinstance(value["items"], list) or not value["items"]:
+        raise ValueError("Archive selection must contain at least one item")
+    by_path = {record.relative_path: record for record in records}
+    selected = []
+    seen = set()
+    for item in value["items"]:
+        if not isinstance(item, dict) or set(item) != {"relative_path", "sha256"}:
+            raise ValueError("Archive selection item is invalid")
+        relative_path = item["relative_path"]
+        if relative_path in seen:
+            raise ValueError("Archive selection contains a duplicate path")
+        seen.add(relative_path)
+        record = by_path.get(relative_path)
+        if record is None or record.sha256 != item["sha256"]:
+            raise ValueError("Archive selection identity mismatch")
+        selected.append(record)
+    return selected
 
 
 def parser() -> argparse.ArgumentParser:
@@ -92,6 +131,29 @@ def parser() -> argparse.ArgumentParser:
     stage_recover.add_argument("--state-db", required=True, type=Path)
     stage_status = commands.add_parser("stage-status", help="Show reversible staging journal counts")
     stage_status.add_argument("--state-db", required=True, type=Path)
+    batch_create = commands.add_parser("archive-batch-create", help="Admit archive files and create the next immutable review batch")
+    batch_create.add_argument("root", type=Path); batch_create.add_argument("--state-db", required=True, type=Path)
+    batch_create.add_argument("--include", nargs="+", required=True); batch_create.add_argument("--limit", type=int, default=25)
+    batch_create.add_argument("--max-file-mb", type=int, default=20)
+    batch_create.add_argument("--taxonomy", type=Path)
+    batch_create.add_argument("--local-model", action="store_true")
+    batch_create.add_argument("--selection-manifest", type=Path,
+                              help="Admit only exact path-and-hash-bound items from a selection manifest")
+    batch_export = commands.add_parser("archive-batch-export", help="Export a non-overwriting review CSV")
+    batch_export.add_argument("batch_id"); batch_export.add_argument("--state-db", required=True, type=Path)
+    batch_export.add_argument("--output", required=True, type=Path)
+    batch_export.add_argument("--xlsx", action="store_true", help="Export a formatted Excel review workbook")
+    batch_import = commands.add_parser("archive-review-import", help="Import hash-bound human review decisions")
+    batch_import.add_argument("review_csv", type=Path); batch_import.add_argument("--state-db", required=True, type=Path)
+    batch_status = commands.add_parser("archive-batch-status", help="Show durable archive review counts")
+    batch_status.add_argument("--state-db", required=True, type=Path)
+    research_export = commands.add_parser("archive-research-export", help="Export approved draft research tickets")
+    research_export.add_argument("--state-db", required=True, type=Path); research_export.add_argument("--output", required=True, type=Path)
+    manifest_export = commands.add_parser("archive-staging-manifest", help="Export an inert hash-bound staging manifest")
+    manifest_export.add_argument("--state-db", required=True, type=Path); manifest_export.add_argument("--output", required=True, type=Path)
+    dataset_export = commands.add_parser("archive-dataset-export", help="Export deterministic reviewed train/evaluation splits")
+    dataset_export.add_argument("--state-db", required=True, type=Path); dataset_export.add_argument("--train", required=True, type=Path)
+    dataset_export.add_argument("--evaluation", required=True, type=Path)
     return root
 
 
@@ -171,6 +233,88 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "stage-status":
             with connect_staging(args.state_db) as database:
                 print(json.dumps(staging_status_counts(database), sort_keys=True))
+            return 0
+        if args.command == "archive-batch-create":
+            suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}
+            corpus_records = scan_files(args.root, max_file_bytes=args.max_file_mb * 1024 * 1024,
+                                        include_suffixes=suffixes)
+            records = corpus_records
+            if args.selection_manifest:
+                records = _select_manifest_records(args.root, records, args.selection_manifest)
+            with connect_review_batches(args.state_db) as database:
+                admitted = admit_review_sources(database, args.root, records)
+                batch = create_review_batch(database, limit=args.limit)
+                candidate_count = 0
+                relationship_count = 0
+                if batch:
+                    taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
+                    local_model_config = LocalModelConfig.from_environment() if args.local_model else None
+                    by_path = {record.relative_path: record for record in records}
+                    candidates = []
+                    for item in batch["items"]:
+                        record = by_path[item["relative_path"]]
+                        classification = classify(record, taxonomy)
+                        if local_model_config and record.extracted_text:
+                            classification = classify_with_local_model(
+                                record, local_model_config,
+                                allowed_modules=[*taxonomy.modules, taxonomy.fallback_module] if taxonomy else None)
+                        epistemic = assess(record)
+                        provenance = classification.source
+                        if local_model_config:
+                            provenance += (f"; model={local_model_config.model}; "
+                                           f"max_content_chars={local_model_config.max_content_chars}")
+                        candidates.append({"source_id": item["source_id"],
+                            "model_summary": classification.summary,
+                            "proposed_topic": classification.module,
+                            "proposed_maturity": epistemic.maturity,
+                            "proposed_authority": epistemic.authority_status,
+                            "proposal_reason": f"{provenance}; {epistemic.reason}",
+                            "classification_confidence": classification.confidence,
+                            "classification_abstained": classification.module in {
+                                taxonomy.fallback_module if taxonomy else "unclassified"
+                            },
+                            "risk_flags": [finding.kind for finding in privacy_findings(record)]})
+                    candidate_count = store_candidates(database, batch["batch_id"], candidates)
+                    selected_records = [
+                        (item["source_id"], by_path[item["relative_path"]]) for item in batch["items"]
+                    ]
+                    relationship_count = store_relationships(
+                        database, batch["batch_id"],
+                        detect_relationships(selected_records, corpus_records),
+                    )
+                print(json.dumps({"admitted": admitted, "candidates": candidate_count,
+                    "relationships": relationship_count,
+                    "batch": batch, "status": review_batch_counts(database),
+                    "routing": routing_counts(database),
+                    "relationship_counts": relationship_counts(database)}, sort_keys=True))
+            return 0
+        if args.command == "archive-batch-export":
+            with connect_review_batches(args.state_db) as database:
+                exported = (export_review_xlsx if args.xlsx else export_review_csv)(database, args.batch_id, args.output)
+                print(json.dumps({"output": str(exported.resolve()), "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-review-import":
+            with connect_review_batches(args.state_db) as database:
+                imported = import_review_csv(database, args.review_csv)
+                print(json.dumps({"imported": imported, "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-batch-status":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({"status": review_batch_counts(database),
+                                  "routing": routing_counts(database),
+                                  "relationship_counts": relationship_counts(database)}, sort_keys=True))
+            return 0
+        if args.command == "archive-research-export":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({"tickets": export_research_tickets(database, args.output), "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-staging-manifest":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(export_staging_manifest(database, args.output), sort_keys=True))
+            return 0
+        if args.command == "archive-dataset-export":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(export_training_split(database, args.train, args.evaluation), sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file

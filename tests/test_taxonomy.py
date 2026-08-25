@@ -41,6 +41,13 @@ def test_zero_score_and_ties_fail_to_manual_review(tmp_path: Path):
     assert classify(record("orchard reactor"), taxonomy).module == "manual_review"
 
 
+def test_taxonomy_terms_match_whole_words_not_substrings(tmp_path: Path):
+    taxonomy = load_taxonomy(write_taxonomy(
+        tmp_path / "taxonomy.json", modules={"ora": ["ora"], "ecology": ["restoration"]}
+    ))
+    assert classify(record("Ecological restoration"), taxonomy).module == "ecology"
+
+
 @pytest.mark.parametrize("change", [
     {"contract_version": "future"},
     {"unexpected": True},
