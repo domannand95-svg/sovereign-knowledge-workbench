@@ -16,6 +16,10 @@ from .scheduler import connect_schedule, enqueue_schedule, load_workers, run_pen
 from .staging import (StagingError, build_plan as build_stage_plan, connect as connect_staging,
                       execute as execute_stage, recover as recover_staging, rollback as rollback_stage,
                       status_counts as staging_status_counts)
+from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
+                             counts as review_batch_counts, create_next as create_review_batch,
+                             export_review_csv, import_review_csv)
+from .intake import scan_files
 
 
 def parser() -> argparse.ArgumentParser:
@@ -92,6 +96,17 @@ def parser() -> argparse.ArgumentParser:
     stage_recover.add_argument("--state-db", required=True, type=Path)
     stage_status = commands.add_parser("stage-status", help="Show reversible staging journal counts")
     stage_status.add_argument("--state-db", required=True, type=Path)
+    batch_create = commands.add_parser("archive-batch-create", help="Admit archive files and create the next immutable review batch")
+    batch_create.add_argument("root", type=Path); batch_create.add_argument("--state-db", required=True, type=Path)
+    batch_create.add_argument("--include", nargs="+", required=True); batch_create.add_argument("--limit", type=int, default=25)
+    batch_create.add_argument("--max-file-mb", type=int, default=20)
+    batch_export = commands.add_parser("archive-batch-export", help="Export a non-overwriting review CSV")
+    batch_export.add_argument("batch_id"); batch_export.add_argument("--state-db", required=True, type=Path)
+    batch_export.add_argument("--output", required=True, type=Path)
+    batch_import = commands.add_parser("archive-review-import", help="Import hash-bound human review decisions")
+    batch_import.add_argument("review_csv", type=Path); batch_import.add_argument("--state-db", required=True, type=Path)
+    batch_status = commands.add_parser("archive-batch-status", help="Show durable archive review counts")
+    batch_status.add_argument("--state-db", required=True, type=Path)
     return root
 
 
@@ -171,6 +186,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "stage-status":
             with connect_staging(args.state_db) as database:
                 print(json.dumps(staging_status_counts(database), sort_keys=True))
+            return 0
+        if args.command == "archive-batch-create":
+            suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}
+            records = scan_files(args.root, max_file_bytes=args.max_file_mb * 1024 * 1024,
+                                 include_suffixes=suffixes)
+            with connect_review_batches(args.state_db) as database:
+                admitted = admit_review_sources(database, args.root, records)
+                batch = create_review_batch(database, limit=args.limit)
+                print(json.dumps({"admitted": admitted, "batch": batch, "status": review_batch_counts(database)}, sort_keys=True))
+            return 0
+        if args.command == "archive-batch-export":
+            with connect_review_batches(args.state_db) as database:
+                exported = export_review_csv(database, args.batch_id, args.output)
+                print(json.dumps({"output": str(exported.resolve()), "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-review-import":
+            with connect_review_batches(args.state_db) as database:
+                imported = import_review_csv(database, args.review_csv)
+                print(json.dumps({"imported": imported, "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-batch-status":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(review_batch_counts(database), sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file

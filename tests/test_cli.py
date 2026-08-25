@@ -37,3 +37,22 @@ def test_batch_counts_oversized_files_without_aborting(tmp_path: Path, capsys):
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["completed"] == 1
     assert outcome["skipped_oversize"] == 1
+
+
+def test_archive_batch_cli_resumes_and_exports_without_overwrite(tmp_path: Path, capsys):
+    source = tmp_path / "source"; source.mkdir()
+    for index in range(3):
+        (source / f"{index}.txt").write_text(f"record {index}", encoding="utf-8")
+    state = tmp_path / "review.db"; output = tmp_path / "batch.csv"
+    args = ["archive-batch-create", str(source), "--state-db", str(state), "--include", ".txt", "--limit", "2"]
+    assert main(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["batch"]["sequence"] == 1 and len(first["batch"]["items"]) == 2
+    assert main(args) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["admitted"] == 0 and second["batch"]["sequence"] == 2
+    assert main(["archive-batch-export", first["batch"]["batch_id"], "--state-db", str(state), "--output", str(output)]) == 0
+    capsys.readouterr()
+    assert output.exists()
+    assert main(["archive-batch-export", first["batch"]["batch_id"], "--state-db", str(state), "--output", str(output)]) == 3
+    assert "never overwritten" in capsys.readouterr().err
