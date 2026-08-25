@@ -46,7 +46,10 @@ def analyze_workspace(
         classification = classify(record, taxonomy)
         if use_local_model and record.extracted_text:
             try:
-                classification = classify_with_local_model(record, model_config)
+                allowed_modules = [*taxonomy.modules, taxonomy.fallback_module] if taxonomy else None
+                classification = classify_with_local_model(
+                    record, model_config, allowed_modules=allowed_modules,
+                )
             except ModelError as exc:
                 report.findings.append(Finding(
                     "model_failure", "medium", str(exc), record.relative_path,

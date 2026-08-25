@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 
 from sovereign_workbench.analysis import classify
 from sovereign_workbench.model import FileRecord
@@ -63,3 +64,15 @@ def test_report_records_taxonomy_provenance(tmp_path: Path):
     assert report.taxonomy_sha256 == taxonomy.sha256
     assert report.classifications["sample.txt"].module == "beta"
     assert all(proposal.status == "proposed" for proposal in report.proposals)
+
+
+def test_private_taxonomy_bounds_local_model_modules(tmp_path: Path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "sample.txt").write_text("reactor", encoding="utf-8")
+    taxonomy_path = write_taxonomy(tmp_path / "taxonomy.json")
+    with patch("sovereign_workbench.pipeline.classify_with_local_model") as model:
+        model.side_effect = RuntimeError("captured")
+        with pytest.raises(RuntimeError, match="captured"):
+            analyze_workspace(source, taxonomy_path=taxonomy_path, use_local_model=True)
+    assert model.call_args.kwargs["allowed_modules"] == ["alpha", "beta", "manual_review"]
