@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS archive_review_decisions (
   reviewer TEXT NOT NULL,
   decided_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS archive_review_candidates (
+  source_id TEXT PRIMARY KEY REFERENCES review_sources(source_id),
+  batch_id TEXT NOT NULL REFERENCES review_batches(batch_id),
+  model_summary TEXT NOT NULL,
+  proposed_topic TEXT NOT NULL,
+  proposed_maturity TEXT NOT NULL,
+  proposed_authority TEXT NOT NULL,
+  proposal_reason TEXT NOT NULL,
+  candidate_sha256 TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS review_batches_no_update
   BEFORE UPDATE ON review_batches BEGIN SELECT RAISE(ABORT, 'review batches are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batches_no_delete
@@ -68,6 +78,10 @@ CREATE TRIGGER IF NOT EXISTS archive_review_decisions_no_update
   BEFORE UPDATE ON archive_review_decisions BEGIN SELECT RAISE(ABORT, 'archive review decisions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_review_decisions_no_delete
   BEFORE DELETE ON archive_review_decisions BEGIN SELECT RAISE(ABORT, 'archive review decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_review_candidates_no_update
+  BEFORE UPDATE ON archive_review_candidates BEGIN SELECT RAISE(ABORT, 'archive review candidates are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_review_candidates_no_delete
+  BEFORE DELETE ON archive_review_candidates BEGIN SELECT RAISE(ABORT, 'archive review candidates are immutable'); END;
 """
 
 TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
@@ -172,8 +186,11 @@ def export_review_csv(database: sqlite3.Connection, batch_id: str, output: Path)
     if output.exists():
         raise ValueError("Review export already exists; prior exports are never overwritten")
     rows = database.execute(
-        "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status "
+        "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status,"
+        "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
+        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,'') "
         "FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
+        "LEFT JOIN archive_review_candidates c ON c.source_id=s.source_id "
         "WHERE i.batch_id=? ORDER BY i.ordinal", (batch_id,),
     ).fetchall()
     if not rows:
@@ -182,16 +199,41 @@ def export_review_csv(database: sqlite3.Connection, batch_id: str, output: Path)
     with output.open("x", encoding="utf-8-sig", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=REVIEW_COLUMNS)
         writer.writeheader()
-        for source_id, path, digest, modified_ns, extraction_status in rows:
+        for source_id, path, digest, modified_ns, extraction_status, summary, topic, maturity, authority, reason in rows:
             value = {column: "" for column in REVIEW_COLUMNS}
             value.update({"batch_id": batch_id, "source_id": source_id, "source_path": path,
                           "source_sha256": digest, "modified_ns": modified_ns,
                           "extraction_status": extraction_status, "decision": "NEEDS_RESEARCH",
+                          "model_summary": summary, "proposed_topic": topic,
+                          "proposed_maturity": maturity, "proposed_authority": authority,
+                          "proposal_reason": reason,
                           "topic": "Needs review", "maturity": "Needs review",
                           "authority": "Needs review", "confidence": "UNKNOWN",
                           "privacy_status": "Needs review", "canonical_status": "UNRESOLVED"})
             writer.writerow(value)
     return output
+
+
+def store_candidates(database: sqlite3.Connection, batch_id: str, candidates: list[dict[str, str]]) -> int:
+    stored = 0
+    for candidate in candidates:
+        bound = database.execute("SELECT 1 FROM review_batch_items WHERE batch_id=? AND source_id=?",
+                                 (batch_id, candidate["source_id"])).fetchone()
+        if not bound:
+            raise ValueError("Candidate is not bound to this batch")
+        value = {key: str(candidate.get(key, "")) for key in
+                 ("source_id", "model_summary", "proposed_topic", "proposed_maturity",
+                  "proposed_authority", "proposal_reason")}
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(canonical.encode()).hexdigest()
+        cursor = database.execute(
+            "INSERT OR IGNORE INTO archive_review_candidates VALUES(?,?,?,?,?,?,?,?)",
+            (value["source_id"], batch_id, value["model_summary"], value["proposed_topic"],
+             value["proposed_maturity"], value["proposed_authority"], value["proposal_reason"], digest),
+        )
+        stored += cursor.rowcount
+    database.commit()
+    return stored
 
 
 def import_review_csv(database: sqlite3.Connection, path: Path) -> int:

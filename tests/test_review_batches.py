@@ -5,7 +5,7 @@ import csv
 import pytest
 
 from sovereign_workbench.intake import scan_files
-from sovereign_workbench.review_batches import admit, connect, counts, create_next, export_review_csv, import_review_csv
+from sovereign_workbench.review_batches import admit, connect, counts, create_next, export_review_csv, import_review_csv, store_candidates
 
 
 def make_files(root: Path, count: int) -> None:
@@ -88,3 +88,18 @@ def test_review_import_rejects_identity_tampering(tmp_path: Path):
         output.write_text(output.read_text(encoding="utf-8-sig").replace(batch["items"][0]["source_sha256"], "0" * 64), encoding="utf-8-sig")
         with pytest.raises(ValueError):
             import_review_csv(database, output)
+
+
+def test_candidate_population_is_immutable_and_exported(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 1)
+    output = tmp_path / "review.csv"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        item = batch["items"][0]
+        candidate = {"source_id": item["source_id"], "model_summary": "Bounded summary",
+                     "proposed_topic": "research", "proposed_maturity": "research",
+                     "proposed_authority": "non_authoritative_candidate", "proposal_reason": "deterministic"}
+        assert store_candidates(database, batch["batch_id"], [candidate]) == 1
+        assert store_candidates(database, batch["batch_id"], [candidate]) == 0
+        export_review_csv(database, batch["batch_id"], output)
+        assert "Bounded summary" in output.read_text(encoding="utf-8-sig")

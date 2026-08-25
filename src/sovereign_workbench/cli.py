@@ -18,8 +18,12 @@ from .staging import (StagingError, build_plan as build_stage_plan, connect as c
                       status_counts as staging_status_counts)
 from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
                              counts as review_batch_counts, create_next as create_review_batch,
-                             export_review_csv, import_review_csv)
+                             export_review_csv, import_review_csv, store_candidates)
 from .intake import scan_files
+from .analysis import classify
+from .epistemic import assess
+from .taxonomy import load_taxonomy
+from .local_model import LocalModelConfig, classify_with_local_model
 
 
 def parser() -> argparse.ArgumentParser:
@@ -100,6 +104,8 @@ def parser() -> argparse.ArgumentParser:
     batch_create.add_argument("root", type=Path); batch_create.add_argument("--state-db", required=True, type=Path)
     batch_create.add_argument("--include", nargs="+", required=True); batch_create.add_argument("--limit", type=int, default=25)
     batch_create.add_argument("--max-file-mb", type=int, default=20)
+    batch_create.add_argument("--taxonomy", type=Path)
+    batch_create.add_argument("--local-model", action="store_true")
     batch_export = commands.add_parser("archive-batch-export", help="Export a non-overwriting review CSV")
     batch_export.add_argument("batch_id"); batch_export.add_argument("--state-db", required=True, type=Path)
     batch_export.add_argument("--output", required=True, type=Path)
@@ -194,7 +200,27 @@ def main(argv: list[str] | None = None) -> int:
             with connect_review_batches(args.state_db) as database:
                 admitted = admit_review_sources(database, args.root, records)
                 batch = create_review_batch(database, limit=args.limit)
-                print(json.dumps({"admitted": admitted, "batch": batch, "status": review_batch_counts(database)}, sort_keys=True))
+                candidate_count = 0
+                if batch:
+                    taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
+                    by_path = {record.relative_path: record for record in records}
+                    candidates = []
+                    for item in batch["items"]:
+                        record = by_path[item["relative_path"]]
+                        classification = classify(record, taxonomy)
+                        if args.local_model and record.extracted_text:
+                            classification = classify_with_local_model(
+                                record, LocalModelConfig.from_environment(),
+                                allowed_modules=[*taxonomy.modules, taxonomy.fallback_module] if taxonomy else None)
+                        epistemic = assess(record)
+                        candidates.append({"source_id": item["source_id"],
+                            "model_summary": classification.summary,
+                            "proposed_topic": classification.module,
+                            "proposed_maturity": epistemic.maturity,
+                            "proposed_authority": epistemic.authority_status,
+                            "proposal_reason": f"{classification.source}; {epistemic.reason}"})
+                    candidate_count = store_candidates(database, batch["batch_id"], candidates)
+                print(json.dumps({"admitted": admitted, "candidates": candidate_count, "batch": batch, "status": review_batch_counts(database)}, sort_keys=True))
             return 0
         if args.command == "archive-batch-export":
             with connect_review_batches(args.state_db) as database:
