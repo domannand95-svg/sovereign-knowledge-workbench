@@ -122,6 +122,20 @@ CREATE TABLE IF NOT EXISTS archive_research_evidence_returns (
   authority TEXT NOT NULL CHECK(authority='NONE'),
   imported_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS archive_dataset_allocations (
+  allocation_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL UNIQUE REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  source_family_id TEXT NOT NULL,
+  allocation TEXT NOT NULL CHECK(allocation IN (
+    'TRAIN_ELIGIBLE','HELD_OUT_LOCKED','RESEARCH_ONLY','EXCLUDED'
+  )),
+  behavior_category TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  allocation_sha256 TEXT NOT NULL UNIQUE,
+  assigned_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS review_batches_no_update
   BEFORE UPDATE ON review_batches BEGIN SELECT RAISE(ABORT, 'review batches are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batches_no_delete
@@ -154,6 +168,10 @@ CREATE TRIGGER IF NOT EXISTS archive_research_evidence_returns_no_update
   BEFORE UPDATE ON archive_research_evidence_returns BEGIN SELECT RAISE(ABORT, 'research evidence returns are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_research_evidence_returns_no_delete
   BEFORE DELETE ON archive_research_evidence_returns BEGIN SELECT RAISE(ABORT, 'research evidence returns are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_dataset_allocations_no_update
+  BEFORE UPDATE ON archive_dataset_allocations BEGIN SELECT RAISE(ABORT, 'dataset allocations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_dataset_allocations_no_delete
+  BEFORE DELETE ON archive_dataset_allocations BEGIN SELECT RAISE(ABORT, 'dataset allocations are immutable'); END;
 """
 
 TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
@@ -163,6 +181,12 @@ DECISIONS = {"APPROVE", "REJECT", "NEEDS_RESEARCH", "QUARANTINE"}
 REVIEW_ROUTES = {"SPOT_CHECK_ELIGIBLE", "MANUAL_REVIEW_REQUIRED", "RECOVERY_REQUIRED"}
 RELATIONSHIP_TYPES = {"EXACT_DUPLICATE", "POSSIBLE_PARENT", "VERSION_SIBLING",
                       "POSSIBLE_SUPERSEDES", "HASH_COMPANION"}
+DATASET_ALLOCATIONS = {"TRAIN_ELIGIBLE", "HELD_OUT_LOCKED", "RESEARCH_ONLY", "EXCLUDED"}
+BEHAVIOR_CATEGORIES = {
+    "SOVEREIGN_TERMINOLOGY", "AUTHORITY_BOUNDARY", "AUTHORITY_ESCALATION_REJECTION",
+    "SCHEMA_CONTRACT_INTERPRETATION", "STRUCTURED_OUTPUT", "ORDINARY_CODING",
+    "GENERAL_REASONING", "OUT_OF_DOMAIN", "HALLUCINATION_HANDLING", "REGRESSION",
+}
 REVIEW_COLUMNS = (
     "batch_id", "source_id", "source_path", "source_sha256", "modified_ns", "extraction_status",
     "model_summary", "proposed_topic", "proposed_maturity", "proposed_authority", "proposal_reason",
@@ -797,6 +821,82 @@ def import_research_evidence_returns(database: sqlite3.Connection, input_path: P
     return imported
 
 
+DATASET_ALLOCATION_FIELDS = {
+    "contract_version", "source_id", "source_sha256", "source_family_id", "allocation",
+    "behavior_category", "reviewer", "reason", "allocation_sha256",
+}
+
+
+def import_dataset_allocations(database: sqlite3.Connection, input_path: Path) -> int:
+    """Append human dataset allocations without granting training execution authority."""
+    imported = 0
+    with input_path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Dataset allocation line {line_number} is not valid JSON") from exc
+            if not isinstance(value, dict) or set(value) != DATASET_ALLOCATION_FIELDS:
+                raise ValueError("Dataset allocation fields do not match the frozen contract")
+            if value["contract_version"] != "sovereign.workbench.dataset-allocation.v1":
+                raise ValueError("Unsupported dataset allocation contract")
+            for field in ("source_id", "source_sha256", "source_family_id", "allocation",
+                          "behavior_category", "reviewer", "reason", "allocation_sha256"):
+                if not isinstance(value[field], str) or not value[field].strip():
+                    raise ValueError(f"Dataset allocation {field} must be non-empty text")
+            if value["allocation"] not in DATASET_ALLOCATIONS:
+                raise ValueError("Dataset allocation has an invalid controlled value")
+            if value["behavior_category"] not in BEHAVIOR_CATEGORIES:
+                raise ValueError("Dataset allocation behavior category is invalid")
+            source = database.execute(
+                "SELECT source_sha256 FROM review_sources WHERE source_id=?", (value["source_id"],)
+            ).fetchone()
+            if not source or source[0] != value["source_sha256"]:
+                raise ValueError("Dataset allocation source identity mismatch")
+            latest = database.execute(
+                "SELECT decision,privacy_status,canonical_status FROM archive_review_decisions "
+                "WHERE source_id=? ORDER BY decided_at DESC,decision_id DESC LIMIT 1",
+                (value["source_id"],),
+            ).fetchone()
+            if not latest:
+                raise ValueError("Dataset allocation requires a human review decision")
+            if value["allocation"] in {"TRAIN_ELIGIBLE", "HELD_OUT_LOCKED"}:
+                if latest[0] != "APPROVE" or latest[1] != "Reviewed":
+                    raise ValueError("Training and held-out allocations require an approved privacy-reviewed source")
+                if latest[2] in {"DUPLICATE", "SUPERSEDED", "UNRESOLVED"}:
+                    raise ValueError("Training and held-out allocations require resolved canonical status")
+            family_splits = database.execute(
+                "SELECT DISTINCT allocation FROM archive_dataset_allocations WHERE source_family_id=? "
+                "AND allocation IN ('TRAIN_ELIGIBLE','HELD_OUT_LOCKED')",
+                (value["source_family_id"],),
+            ).fetchall()
+            desired = value["allocation"]
+            if family_splits and desired in {"TRAIN_ELIGIBLE", "HELD_OUT_LOCKED"}:
+                if any(row[0] != desired for row in family_splits):
+                    raise ValueError("A source family cannot cross the train and held-out boundary")
+            hash_input = {key: value[key] for key in sorted(DATASET_ALLOCATION_FIELDS - {"allocation_sha256"})}
+            canonical = json.dumps(hash_input, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":"))
+            calculated = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if value["allocation_sha256"] != calculated:
+                raise ValueError("Dataset allocation hash is invalid")
+            allocation_id = f"DA-{calculated[:24]}"
+            try:
+                cursor = database.execute(
+                    "INSERT OR IGNORE INTO archive_dataset_allocations VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (allocation_id, value["source_id"], value["source_sha256"],
+                     value["source_family_id"], desired, value["behavior_category"],
+                     value["reviewer"].strip(), value["reason"].strip(), calculated, _now()),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("A source already has a different immutable dataset allocation") from exc
+            imported += cursor.rowcount
+    database.commit()
+    return imported
+
+
 def export_staging_manifest(database: sqlite3.Connection, output: Path) -> dict[str, object]:
     if output.exists():
         raise ValueError("Staging manifest already exists")
@@ -830,19 +930,35 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
         "SELECT d.decision_id,d.source_id,d.decision,d.topic,d.maturity,d.authority,d.confidence,"
         "d.privacy_status,d.canonical_status,d.review_note,d.research_question,"
         "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
-        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,'') "
-        "FROM ranked_decisions d LEFT JOIN archive_review_candidates c ON c.source_id=d.source_id "
-        "WHERE d.decision_rank=1 ORDER BY d.source_id"
+        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,''),"
+        "a.allocation,a.source_family_id,a.behavior_category "
+        "FROM ranked_decisions d JOIN archive_dataset_allocations a ON a.source_id=d.source_id "
+        "LEFT JOIN archive_review_candidates c ON c.source_id=d.source_id "
+        "WHERE d.decision_rank=1 AND a.allocation IN ('TRAIN_ELIGIBLE','HELD_OUT_LOCKED') "
+        "ORDER BY d.source_id"
     ).fetchall()
-    if len(rows) < 5:
-        raise ValueError("At least five reviewed examples are required for a split")
+    if len(rows) < 400:
+        raise ValueError("At least 400 approved allocated examples are required for dataset export")
     train_rows, eval_rows = [], []
+    family_splits: dict[str, str] = {}
+    category_counts = {category: 0 for category in BEHAVIOR_CATEGORIES}
+    train_category_counts = {category: 0 for category in BEHAVIOR_CATEGORIES}
     for row in rows:
         (decision_id, source_id, decision, topic, maturity, authority, confidence, privacy,
          canonical, note, question, summary, proposed_topic, proposed_maturity,
-         proposed_authority, reason) = row
+         proposed_authority, reason, allocation, family_id, category) = row
+        if decision != "APPROVE" or privacy != "Reviewed" or canonical in {
+                "DUPLICATE", "SUPERSEDED", "UNRESOLVED"}:
+            raise ValueError("Dataset export encountered an ineligible review decision")
+        previous = family_splits.setdefault(family_id, allocation)
+        if previous != allocation:
+            raise ValueError("A source family crosses the train and held-out boundary")
+        category_counts[category] += 1
+        if allocation == "TRAIN_ELIGIBLE":
+            train_category_counts[category] += 1
         example = {"contract_version": "sovereign.workbench.review-example.v1",
                    "example_id": decision_id, "source_id": source_id,
+                   "source_family_id": family_id, "behavior_category": category,
                    "input": {"summary": summary, "proposed_topic": proposed_topic,
                              "proposed_maturity": proposed_maturity,
                              "proposed_authority": proposed_authority, "proposal_reason": reason},
@@ -850,10 +966,14 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
                                 "authority": authority, "confidence": confidence,
                                 "privacy_status": privacy, "canonical_status": canonical,
                                 "review_note": note, "research_question": question}}
-        bucket = int(hashlib.sha256(source_id.encode()).hexdigest()[:8], 16) % 5
-        (eval_rows if bucket == 0 else train_rows).append(example)
-    if not train_rows or not eval_rows:
-        raise ValueError("Deterministic split requires examples spanning both hash buckets")
+        (train_rows if allocation == "TRAIN_ELIGIBLE" else eval_rows).append(example)
+    if len(train_rows) < 300 or len(eval_rows) < 100:
+        raise ValueError("Dataset export requires at least 300 train and 100 locked held-out examples")
+    missing = sorted(category for category, count in category_counts.items() if count < 25)
+    if missing:
+        raise ValueError("Every critical behavior category requires at least 25 examples")
+    if any(count / len(train_rows) > 0.30 for count in train_category_counts.values()):
+        raise ValueError("No behavior category may exceed 30 percent of the training set")
     for path, values in ((train, train_rows), (evaluation, eval_rows)):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8", newline="\n") as stream:

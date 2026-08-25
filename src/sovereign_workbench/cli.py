@@ -23,7 +23,7 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              store_relationships)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
-from .review_batches import import_research_evidence_returns
+from .review_batches import import_dataset_allocations, import_research_evidence_returns
 from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
@@ -167,6 +167,9 @@ def parser() -> argparse.ArgumentParser:
     dataset_export = commands.add_parser("archive-dataset-export", help="Export deterministic reviewed train/evaluation splits")
     dataset_export.add_argument("--state-db", required=True, type=Path); dataset_export.add_argument("--train", required=True, type=Path)
     dataset_export.add_argument("--evaluation", required=True, type=Path)
+    dataset_allocate = commands.add_parser("archive-dataset-allocate", help="Import immutable human dataset allocations")
+    dataset_allocate.add_argument("input", type=Path)
+    dataset_allocate.add_argument("--state-db", required=True, type=Path)
     return root
 
 
@@ -345,6 +348,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "archive-dataset-export":
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps(export_training_split(database, args.train, args.evaluation), sort_keys=True))
+            return 0
+        if args.command == "archive-dataset-allocate":
+            with connect_review_batches(args.state_db) as database:
+                imported = import_dataset_allocations(database, args.input)
+                print(json.dumps({"imported": imported, "authority": "none",
+                                  "training_authorized": False}, sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file

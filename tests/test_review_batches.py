@@ -9,7 +9,7 @@ import pytest
 
 from sovereign_workbench.intake import scan_files
 from sovereign_workbench.review_batches import (admit as _admit, connect, counts, create_next, export_review_csv,
-    import_research_evidence_returns, import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
+    import_dataset_allocations, import_research_evidence_returns, import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
     export_training_split, list_intake_roots, register_intake_root, relationship_counts,
     routing_counts, store_relationships)
 
@@ -265,11 +265,8 @@ def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path)
         assert manifest["execution_authorized"] is False
         assert len(manifest["items"]) == 19
         assert all(item["status"] == "PROPOSED" for item in manifest["items"])
-        result = export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
-        assert result["train_examples"] + result["evaluation_examples"] == 20
-        train_ids = {json.loads(line)["source_id"] for line in (tmp_path / "train.jsonl").read_text(encoding="utf-8").splitlines()}
-        eval_ids = {json.loads(line)["source_id"] for line in (tmp_path / "eval.jsonl").read_text(encoding="utf-8").splitlines()}
-        assert train_ids.isdisjoint(eval_ids)
+        with pytest.raises(ValueError, match="400 approved allocated"):
+            export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
 
 
 def _returned_research(ticket: dict[str, object]) -> dict[str, object]:
@@ -371,15 +368,98 @@ def test_training_split_uses_latest_decision_without_source_leakage(tmp_path: Pa
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
         assert import_review_csv(database, review) == 1
 
-        result = export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
-        assert result["train_examples"] + result["evaluation_examples"] == 20
-        examples = []
-        for path in (tmp_path / "train.jsonl", tmp_path / "eval.jsonl"):
-            examples.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
-        assert len({example["source_id"] for example in examples}) == 20
-        corrected = [example for example in examples if example["source_id"] == rows[0]["source_id"]]
-        assert len(corrected) == 1
-        assert corrected[0]["expected"]["review_note"] == "Corrected review"
+        with pytest.raises(ValueError, match="400 approved allocated"):
+            export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
+
+
+DATASET_CATEGORIES = (
+    "SOVEREIGN_TERMINOLOGY", "AUTHORITY_BOUNDARY", "AUTHORITY_ESCALATION_REJECTION",
+    "SCHEMA_CONTRACT_INTERPRETATION", "STRUCTURED_OUTPUT", "ORDINARY_CODING",
+    "GENERAL_REASONING", "OUT_OF_DOMAIN", "HALLUCINATION_HANDLING", "REGRESSION",
+)
+
+
+def _allocation(row: dict[str, str], index: int, allocation: str) -> dict[str, str]:
+    value = {
+        "contract_version": "sovereign.workbench.dataset-allocation.v1",
+        "source_id": row["source_id"], "source_sha256": row["source_sha256"],
+        "source_family_id": f"family-{index:03}", "allocation": allocation,
+        "behavior_category": DATASET_CATEGORIES[index % len(DATASET_CATEGORIES)],
+        "reviewer": "Dominic", "reason": "Human assigned frozen dataset role",
+    }
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value["allocation_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return value
+
+
+def test_dataset_export_requires_approved_immutable_balanced_300_100_allocations(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 400)
+    review = tmp_path / "review.csv"; allocations_path = tmp_path / "allocations.jsonl"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database, limit=400)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        for row in rows:
+            row.update({"decision": "APPROVE", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "HIGH",
+                        "privacy_status": "Reviewed", "canonical_status": "CANONICAL",
+                        "review_note": "Human reviewed for dataset admission", "reviewer": "Dominic"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        assert import_review_csv(database, review) == 400
+        allocations = [_allocation(row, index, "TRAIN_ELIGIBLE" if index < 300 else "HELD_OUT_LOCKED")
+                       for index, row in enumerate(rows)]
+        allocations_path.write_text("".join(json.dumps(value) + "\n" for value in allocations),
+                                    encoding="utf-8")
+        assert import_dataset_allocations(database, allocations_path) == 400
+        assert import_dataset_allocations(database, allocations_path) == 0
+        train = tmp_path / "train.jsonl"; evaluation = tmp_path / "evaluation.jsonl"
+        result = export_training_split(database, train, evaluation)
+        assert result["train_examples"] == 300 and result["evaluation_examples"] == 100
+        train_examples = [json.loads(line) for line in train.read_text(encoding="utf-8").splitlines()]
+        eval_examples = [json.loads(line) for line in evaluation.read_text(encoding="utf-8").splitlines()]
+        assert {row["source_family_id"] for row in train_examples}.isdisjoint(
+            {row["source_family_id"] for row in eval_examples}
+        )
+        assert {row["behavior_category"] for row in train_examples + eval_examples} == set(DATASET_CATEGORIES)
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            database.execute("DELETE FROM archive_dataset_allocations")
+
+
+def test_dataset_allocation_rejects_nonapproved_source_and_family_leakage(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 2)
+    review = tmp_path / "review.csv"; allocation_path = tmp_path / "allocation.jsonl"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        for row in rows:
+            row.update({"decision": "APPROVE", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "HIGH",
+                        "privacy_status": "Reviewed", "canonical_status": "CANONICAL",
+                        "review_note": "Reviewed", "reviewer": "Dominic"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        import_review_csv(database, review)
+        first = _allocation(rows[0], 0, "TRAIN_ELIGIBLE")
+        first["source_family_id"] = "shared-family"
+        first["allocation_sha256"] = hashlib.sha256(json.dumps(
+            {key: value for key, value in first.items() if key != "allocation_sha256"},
+            sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        allocation_path.write_text(json.dumps(first) + "\n", encoding="utf-8")
+        assert import_dataset_allocations(database, allocation_path) == 1
+        second = _allocation(rows[1], 1, "HELD_OUT_LOCKED")
+        second["source_family_id"] = "shared-family"
+        second["allocation_sha256"] = hashlib.sha256(json.dumps(
+            {key: value for key, value in second.items() if key != "allocation_sha256"},
+            sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        allocation_path.write_text(json.dumps(second) + "\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="cannot cross"):
+            import_dataset_allocations(database, allocation_path)
 
 
 def test_formatted_excel_export_is_valid_and_non_overwriting(tmp_path: Path):
