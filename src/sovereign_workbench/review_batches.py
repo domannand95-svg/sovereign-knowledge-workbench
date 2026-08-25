@@ -104,6 +104,24 @@ CREATE TABLE IF NOT EXISTS archive_review_relationships (
   authority TEXT NOT NULL CHECK(authority='NONE'),
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS archive_research_evidence_returns (
+  return_id TEXT PRIMARY KEY,
+  ticket_id TEXT NOT NULL,
+  ticket_sha256 TEXT NOT NULL,
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  question TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  findings_json TEXT NOT NULL,
+  citations_json TEXT NOT NULL,
+  contradictory_evidence_json TEXT NOT NULL,
+  uncertainties_json TEXT NOT NULL,
+  return_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  imported_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS review_batches_no_update
   BEFORE UPDATE ON review_batches BEGIN SELECT RAISE(ABORT, 'review batches are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batches_no_delete
@@ -132,6 +150,10 @@ CREATE TRIGGER IF NOT EXISTS archive_intake_roots_no_update
   BEFORE UPDATE ON archive_intake_roots BEGIN SELECT RAISE(ABORT, 'archive intake roots are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_intake_roots_no_delete
   BEFORE DELETE ON archive_intake_roots BEGIN SELECT RAISE(ABORT, 'archive intake roots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_research_evidence_returns_no_update
+  BEFORE UPDATE ON archive_research_evidence_returns BEGIN SELECT RAISE(ABORT, 'research evidence returns are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_research_evidence_returns_no_delete
+  BEFORE DELETE ON archive_research_evidence_returns BEGIN SELECT RAISE(ABORT, 'research evidence returns are immutable'); END;
 """
 
 TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
@@ -670,24 +692,109 @@ def record_review_decision(database: sqlite3.Connection, row: dict[str, str], *,
     return cursor.rowcount
 
 
+def _research_ticket(decision_id: str, source_id: str, source_sha256: str, topic: str,
+                     question: str, privacy: str, note: str) -> dict[str, object]:
+    ticket = {"contract_version": "sovereign.workbench.research-ticket.v1",
+              "ticket_id": f"RQ-{decision_id[:16]}", "source_id": source_id,
+              "source_sha256": source_sha256, "module_id": topic, "question": question,
+              "review_context": note, "privacy_status": privacy, "status": "DRAFT",
+              "authority": "NONE",
+              "requested_output": {"primary_sources": True, "contradictory_evidence": True,
+                                   "uncertainty": True, "direct_source_urls": True}}
+    canonical = json.dumps(ticket, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    ticket["ticket_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return ticket
+
+
 def export_research_tickets(database: sqlite3.Connection, output: Path) -> int:
     if output.exists():
         raise ValueError("Research-ticket export already exists")
     rows = database.execute(
-        "SELECT decision_id,source_id,topic,research_question,privacy_status,review_note "
-        "FROM archive_review_decisions WHERE decision='NEEDS_RESEARCH' ORDER BY decision_id"
+        "SELECT d.decision_id,d.source_id,s.source_sha256,d.topic,d.research_question,"
+        "d.privacy_status,d.review_note FROM archive_review_decisions d "
+        "JOIN review_sources s ON s.source_id=d.source_id "
+        "WHERE d.decision='NEEDS_RESEARCH' ORDER BY d.decision_id"
     ).fetchall()
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8", newline="\n") as stream:
-        for decision_id, source_id, topic, question, privacy, note in rows:
-            ticket = {"contract_version": "sovereign.workbench.research-ticket.v1",
-                      "ticket_id": f"RQ-{decision_id[:16]}", "source_id": source_id,
-                      "module_id": topic, "question": question, "review_context": note,
-                      "privacy_status": privacy, "status": "DRAFT", "authority": "NONE",
-                      "requested_output": {"primary_sources": True, "contradictory_evidence": True,
-                                           "uncertainty": True, "direct_source_urls": True}}
+        for decision_id, source_id, source_sha256, topic, question, privacy, note in rows:
+            ticket = _research_ticket(decision_id, source_id, source_sha256, topic, question,
+                                      privacy, note)
             stream.write(json.dumps(ticket, ensure_ascii=False, sort_keys=True) + "\n")
     return len(rows)
+
+
+RESEARCH_RETURN_FIELDS = {
+    "contract_version", "ticket_id", "ticket_sha256", "source_id", "source_sha256",
+    "question", "provider", "model", "completed_at", "findings", "citations",
+    "contradictory_evidence", "uncertainties", "authority", "return_sha256",
+}
+
+
+def _expected_ticket(database: sqlite3.Connection, ticket_id: str) -> dict[str, object]:
+    if not ticket_id.startswith("RQ-") or len(ticket_id) != 19:
+        raise ValueError("Research return ticket identifier is invalid")
+    prefix = ticket_id[3:]
+    rows = database.execute(
+        "SELECT d.decision_id,d.source_id,s.source_sha256,d.topic,d.research_question,"
+        "d.privacy_status,d.review_note FROM archive_review_decisions d "
+        "JOIN review_sources s ON s.source_id=d.source_id "
+        "WHERE d.decision='NEEDS_RESEARCH' AND d.decision_id LIKE ?",
+        (prefix + "%",),
+    ).fetchall()
+    if len(rows) != 1:
+        raise ValueError("Research return does not resolve to exactly one reviewed ticket")
+    return _research_ticket(*rows[0])
+
+
+def import_research_evidence_returns(database: sqlite3.Connection, input_path: Path) -> int:
+    """Append hash-bound provider evidence; never changes review or operational authority."""
+    imported = 0
+    with input_path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Research return line {line_number} is not valid JSON") from exc
+            if not isinstance(value, dict) or set(value) != RESEARCH_RETURN_FIELDS:
+                raise ValueError("Research return fields do not match the frozen contract")
+            if value["contract_version"] != "sovereign.workbench.research-evidence-return.v1":
+                raise ValueError("Unsupported research evidence return contract")
+            if value["authority"] != "NONE":
+                raise ValueError("Research evidence returns must have no authority")
+            for field in ("ticket_id", "ticket_sha256", "source_id", "source_sha256",
+                          "question", "provider", "model", "completed_at", "return_sha256"):
+                if not isinstance(value[field], str) or not value[field].strip():
+                    raise ValueError(f"Research return {field} must be non-empty text")
+            for field in ("findings", "citations", "contradictory_evidence", "uncertainties"):
+                if not isinstance(value[field], list):
+                    raise ValueError(f"Research return {field} must be a list")
+            expected = _expected_ticket(database, value["ticket_id"])
+            for field in ("ticket_id", "ticket_sha256", "source_id", "source_sha256", "question"):
+                if value[field] != expected[field]:
+                    raise ValueError(f"Research return {field} does not match its frozen ticket")
+            hash_input = {key: value[key] for key in sorted(RESEARCH_RETURN_FIELDS - {"return_sha256"})}
+            canonical = json.dumps(hash_input, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":"))
+            calculated = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+            if value["return_sha256"] != calculated:
+                raise ValueError("Research return package hash is invalid")
+            return_id = f"RR-{calculated[:24]}"
+            cursor = database.execute(
+                "INSERT OR IGNORE INTO archive_research_evidence_returns VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (return_id, value["ticket_id"], value["ticket_sha256"], value["source_id"],
+                 value["source_sha256"], value["question"], value["provider"], value["model"],
+                 value["completed_at"], json.dumps(value["findings"], ensure_ascii=False, sort_keys=True),
+                 json.dumps(value["citations"], ensure_ascii=False, sort_keys=True),
+                 json.dumps(value["contradictory_evidence"], ensure_ascii=False, sort_keys=True),
+                 json.dumps(value["uncertainties"], ensure_ascii=False, sort_keys=True),
+                 calculated, "NONE", _now()),
+            )
+            imported += cursor.rowcount
+    database.commit()
+    return imported
 
 
 def export_staging_manifest(database: sqlite3.Connection, output: Path) -> dict[str, object]:

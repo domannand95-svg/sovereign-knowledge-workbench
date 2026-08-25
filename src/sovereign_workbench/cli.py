@@ -23,6 +23,7 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              store_relationships)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
+from .review_batches import import_research_evidence_returns
 from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
@@ -158,6 +159,9 @@ def parser() -> argparse.ArgumentParser:
     batch_status.add_argument("--state-db", required=True, type=Path)
     research_export = commands.add_parser("archive-research-export", help="Export approved draft research tickets")
     research_export.add_argument("--state-db", required=True, type=Path); research_export.add_argument("--output", required=True, type=Path)
+    research_import = commands.add_parser("archive-research-import", help="Import immutable hash-bound returned research evidence")
+    research_import.add_argument("input", type=Path)
+    research_import.add_argument("--state-db", required=True, type=Path)
     manifest_export = commands.add_parser("archive-staging-manifest", help="Export an inert hash-bound staging manifest")
     manifest_export.add_argument("--state-db", required=True, type=Path); manifest_export.add_argument("--output", required=True, type=Path)
     dataset_export = commands.add_parser("archive-dataset-export", help="Export deterministic reviewed train/evaluation splits")
@@ -328,6 +332,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "archive-research-export":
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps({"tickets": export_research_tickets(database, args.output), "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-research-import":
+            with connect_review_batches(args.state_db) as database:
+                imported = import_research_evidence_returns(database, args.input)
+                print(json.dumps({"imported": imported, "authority": "none"}, sort_keys=True))
             return 0
         if args.command == "archive-staging-manifest":
             with connect_review_batches(args.state_db) as database:

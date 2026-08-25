@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import sqlite3
 import csv
 import json
@@ -8,7 +9,7 @@ import pytest
 
 from sovereign_workbench.intake import scan_files
 from sovereign_workbench.review_batches import (admit as _admit, connect, counts, create_next, export_review_csv,
-    import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
+    import_research_evidence_returns, import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
     export_training_split, list_intake_roots, register_intake_root, relationship_counts,
     routing_counts, store_relationships)
 
@@ -269,6 +270,84 @@ def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path)
         train_ids = {json.loads(line)["source_id"] for line in (tmp_path / "train.jsonl").read_text(encoding="utf-8").splitlines()}
         eval_ids = {json.loads(line)["source_id"] for line in (tmp_path / "eval.jsonl").read_text(encoding="utf-8").splitlines()}
         assert train_ids.isdisjoint(eval_ids)
+
+
+def _returned_research(ticket: dict[str, object]) -> dict[str, object]:
+    value = {
+        "contract_version": "sovereign.workbench.research-evidence-return.v1",
+        "ticket_id": ticket["ticket_id"], "ticket_sha256": ticket["ticket_sha256"],
+        "source_id": ticket["source_id"], "source_sha256": ticket["source_sha256"],
+        "question": ticket["question"], "provider": "Gemini", "model": "deep-research",
+        "completed_at": "2026-08-25T00:00:00Z",
+        "findings": [{"claim": "example", "assessment": "unresolved"}],
+        "citations": [{"url": "https://example.test/primary", "title": "Primary"}],
+        "contradictory_evidence": [], "uncertainties": ["Independent confirmation required"],
+        "authority": "NONE",
+    }
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value["return_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return value
+
+
+def test_research_return_is_ticket_and_source_hash_bound_immutable_and_idempotent(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 1)
+    review = tmp_path / "review.csv"; tickets_path = tmp_path / "tickets.jsonl"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        rows[0].update({"decision": "NEEDS_RESEARCH", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "LOW",
+                        "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
+                        "review_note": "Verify claims", "reviewer": "Dominic",
+                        "research_question": "Which primary evidence supports this?"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        assert import_review_csv(database, review) == 1
+        assert export_research_tickets(database, tickets_path) == 1
+        ticket = json.loads(tickets_path.read_text(encoding="utf-8"))
+        assert ticket["source_sha256"] == rows[0]["source_sha256"]
+        returned = _returned_research(ticket)
+        returns_path = tmp_path / "returns.jsonl"
+        returns_path.write_text(json.dumps(returned) + "\n", encoding="utf-8")
+        assert import_research_evidence_returns(database, returns_path) == 1
+        assert import_research_evidence_returns(database, returns_path) == 0
+        stored = database.execute(
+            "SELECT ticket_id,source_sha256,authority FROM archive_research_evidence_returns"
+        ).fetchone()
+        assert stored == (ticket["ticket_id"], ticket["source_sha256"], "NONE")
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            database.execute("DELETE FROM archive_research_evidence_returns")
+
+
+def test_research_return_rejects_ticket_mismatch_authority_and_hash_tampering(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 1)
+    review = tmp_path / "review.csv"; tickets_path = tmp_path / "tickets.jsonl"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        rows[0].update({"decision": "NEEDS_RESEARCH", "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "LOW",
+                        "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
+                        "review_note": "Verify", "reviewer": "Dominic", "research_question": "Evidence?"})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        import_review_csv(database, review); export_research_tickets(database, tickets_path)
+        ticket = json.loads(tickets_path.read_text(encoding="utf-8"))
+        base = _returned_research(ticket); path = tmp_path / "return.jsonl"
+        for field, replacement, error in (
+            ("question", "different", "question"),
+            ("authority", "EXECUTE", "no authority"),
+            ("return_sha256", "0" * 64, "package hash"),
+        ):
+            changed = dict(base); changed[field] = replacement
+            path.write_text(json.dumps(changed) + "\n", encoding="utf-8")
+            with pytest.raises(ValueError, match=error):
+                import_research_evidence_returns(database, path)
+        assert database.execute("SELECT COUNT(*) FROM archive_research_evidence_returns").fetchone()[0] == 0
 
 
 def test_training_split_uses_latest_decision_without_source_leakage(tmp_path: Path):
