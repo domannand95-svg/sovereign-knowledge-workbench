@@ -22,6 +22,7 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              relationship_counts, routing_counts, store_candidates,
                              store_relationships)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
+from .review_batches import list_intake_roots, register_intake_root
 from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
@@ -131,6 +132,14 @@ def parser() -> argparse.ArgumentParser:
     stage_recover.add_argument("--state-db", required=True, type=Path)
     stage_status = commands.add_parser("stage-status", help="Show reversible staging journal counts")
     stage_status.add_argument("--state-db", required=True, type=Path)
+    intake_register = commands.add_parser("archive-intake-register", help="Register one immutable observation-only archive intake root")
+    intake_register.add_argument("root", type=Path)
+    intake_register.add_argument("--state-db", required=True, type=Path)
+    intake_register.add_argument("--purpose", required=True)
+    intake_register.add_argument("--include", nargs="+", required=True)
+    intake_register.add_argument("--default", action="store_true")
+    intake_list = commands.add_parser("archive-intake-list", help="List immutable archive intake-root admissions")
+    intake_list.add_argument("--state-db", required=True, type=Path)
     batch_create = commands.add_parser("archive-batch-create", help="Admit archive files and create the next immutable review batch")
     batch_create.add_argument("root", type=Path); batch_create.add_argument("--state-db", required=True, type=Path)
     batch_create.add_argument("--include", nargs="+", required=True); batch_create.add_argument("--limit", type=int, default=25)
@@ -233,6 +242,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "stage-status":
             with connect_staging(args.state_db) as database:
                 print(json.dumps(staging_status_counts(database), sort_keys=True))
+            return 0
+        if args.command == "archive-intake-register":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(register_intake_root(
+                    database, args.root, purpose=args.purpose,
+                    allowed_suffixes=set(args.include), default=args.default,
+                ), sort_keys=True))
+            return 0
+        if args.command == "archive-intake-list":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({"roots": list_intake_roots(database), "authority": "observe_only"},
+                                 sort_keys=True))
             return 0
         if args.command == "archive-batch-create":
             suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}

@@ -7,14 +7,65 @@ import zipfile
 import pytest
 
 from sovereign_workbench.intake import scan_files
-from sovereign_workbench.review_batches import (admit, connect, counts, create_next, export_review_csv,
+from sovereign_workbench.review_batches import (admit as _admit, connect, counts, create_next, export_review_csv,
     import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
-    export_training_split, relationship_counts, routing_counts, store_relationships)
+    export_training_split, list_intake_roots, register_intake_root, relationship_counts,
+    routing_counts, store_relationships)
+
+
+def admit(database, root, records):
+    suffixes = {Path(record.relative_path).suffix for record in records}
+    register_intake_root(database, root, purpose="test intake", allowed_suffixes=suffixes)
+    return _admit(database, root, records)
 
 
 def make_files(root: Path, count: int) -> None:
     for index in range(count):
         (root / f"record-{index:03}.txt").write_text(f"record {index}", encoding="utf-8")
+
+
+def test_intake_root_must_be_explicit_hash_bound_and_append_only(tmp_path: Path):
+    root = tmp_path / "source"; root.mkdir(); make_files(root, 1)
+    with connect(tmp_path / "state.db") as database:
+        with pytest.raises(ValueError, match="not registered"):
+            _admit(database, root, scan_files(root))
+        admission = register_intake_root(
+            database, root, purpose="bounded source", allowed_suffixes={"txt"}
+        )
+        assert admission["inserted"] is True
+        assert admission["authority"] == "OBSERVE_ONLY"
+        assert register_intake_root(
+            database, root, purpose="bounded source", allowed_suffixes={".txt"}
+        )["inserted"] is False
+        assert _admit(database, root, scan_files(root)) == 1
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            database.execute("DELETE FROM archive_intake_roots")
+        listed = list_intake_roots(database)
+        assert len(listed) == 1 and listed[0]["admission_sha256"] == admission["admission_sha256"]
+
+
+def test_only_00_inbox_can_be_default_and_only_one_default_exists(tmp_path: Path):
+    wrong = tmp_path / "Inbox"; wrong.mkdir()
+    first = tmp_path / "00_Inbox"; first.mkdir()
+    second_parent = tmp_path / "other"; second_parent.mkdir()
+    second = second_parent / "00_Inbox"; second.mkdir()
+    with connect(tmp_path / "state.db") as database:
+        with pytest.raises(ValueError, match="exactly 00_Inbox"):
+            register_intake_root(database, wrong, purpose="default", allowed_suffixes={".txt"}, default=True)
+        register_intake_root(database, first, purpose="default", allowed_suffixes={".txt"}, default=True)
+        with pytest.raises(ValueError, match="default intake root"):
+            register_intake_root(database, second, purpose="second", allowed_suffixes={".txt"}, default=True)
+
+
+def test_intake_root_rejects_unadmitted_file_types_and_contract_changes(tmp_path: Path):
+    root = tmp_path / "source"; root.mkdir()
+    (root / "record.md").write_text("record", encoding="utf-8")
+    with connect(tmp_path / "state.db") as database:
+        register_intake_root(database, root, purpose="text only", allowed_suffixes={".txt"})
+        with pytest.raises(ValueError, match="outside"):
+            _admit(database, root, scan_files(root))
+        with pytest.raises(ValueError, match="different immutable admission"):
+            register_intake_root(database, root, purpose="changed", allowed_suffixes={".md"})
 
 
 def test_admission_is_hash_bound_and_idempotent(tmp_path: Path):

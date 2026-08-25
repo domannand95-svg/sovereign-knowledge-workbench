@@ -11,6 +11,17 @@ from .model import FileRecord
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS archive_intake_roots (
+  root_id TEXT PRIMARY KEY,
+  canonical_root TEXT NOT NULL UNIQUE,
+  root_mode TEXT NOT NULL CHECK(root_mode IN ('DEFAULT','EXPLICIT')),
+  purpose TEXT NOT NULL,
+  allowed_suffixes TEXT NOT NULL,
+  admission_sha256 TEXT NOT NULL UNIQUE,
+  admitted_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS archive_intake_single_default_idx
+  ON archive_intake_roots(root_mode) WHERE root_mode='DEFAULT';
 CREATE TABLE IF NOT EXISTS review_sources (
   source_id TEXT PRIMARY KEY,
   root TEXT NOT NULL,
@@ -117,6 +128,10 @@ CREATE TRIGGER IF NOT EXISTS archive_review_relationships_no_update
   BEFORE UPDATE ON archive_review_relationships BEGIN SELECT RAISE(ABORT, 'archive review relationships are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_review_relationships_no_delete
   BEFORE DELETE ON archive_review_relationships BEGIN SELECT RAISE(ABORT, 'archive review relationships are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_intake_roots_no_update
+  BEFORE UPDATE ON archive_intake_roots BEGIN SELECT RAISE(ABORT, 'archive intake roots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_intake_roots_no_delete
+  BEFORE DELETE ON archive_intake_roots BEGIN SELECT RAISE(ABORT, 'archive intake roots are immutable'); END;
 """
 
 TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
@@ -157,12 +172,88 @@ def _source_id(root: str, record: FileRecord) -> str:
     return digest.hexdigest()
 
 
+def _normalise_suffixes(values: set[str]) -> tuple[str, ...]:
+    suffixes = tuple(sorted({
+        value.casefold() if value.startswith(".") else f".{value.casefold()}"
+        for value in values if value.strip()
+    }))
+    if not suffixes:
+        raise ValueError("At least one allowed intake file type is required")
+    return suffixes
+
+
+def register_intake_root(database: sqlite3.Connection, root: Path, *, purpose: str,
+                         allowed_suffixes: set[str], default: bool = False) -> dict[str, object]:
+    """Append one observation-only intake-root admission; never grants file mutation authority."""
+    canonical_root = str(root.resolve(strict=True))
+    if not root.resolve(strict=True).is_dir():
+        raise ValueError("An intake root must be an existing directory")
+    if not purpose.strip():
+        raise ValueError("An intake-root purpose is required")
+    mode = "DEFAULT" if default else "EXPLICIT"
+    if default and Path(canonical_root).name != "00_Inbox":
+        raise ValueError("The default intake root basename must be exactly 00_Inbox")
+    suffixes = _normalise_suffixes(allowed_suffixes)
+    contract = {
+        "contract_version": "sovereign.workbench.intake-root.v1",
+        "canonical_root": canonical_root,
+        "root_mode": mode,
+        "purpose": purpose.strip(),
+        "allowed_suffixes": list(suffixes),
+        "authority": "OBSERVE_ONLY",
+    }
+    canonical = json.dumps(contract, sort_keys=True, separators=(",", ":"))
+    admission_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    root_id = f"IR-{admission_sha256[:24]}"
+    existing = database.execute(
+        "SELECT root_id,root_mode,purpose,allowed_suffixes,admission_sha256 "
+        "FROM archive_intake_roots WHERE canonical_root=?", (canonical_root,),
+    ).fetchone()
+    if existing:
+        expected = (root_id, mode, purpose.strip(), json.dumps(suffixes), admission_sha256)
+        if existing != expected:
+            raise ValueError("This intake root already has a different immutable admission")
+        return {**contract, "root_id": root_id, "admission_sha256": admission_sha256,
+                "inserted": False}
+    try:
+        database.execute(
+            "INSERT INTO archive_intake_roots VALUES(?,?,?,?,?,?,?)",
+            (root_id, canonical_root, mode, purpose.strip(), json.dumps(suffixes),
+             admission_sha256, _now()),
+        )
+        database.commit()
+    except sqlite3.IntegrityError as exc:
+        raise ValueError("A default intake root is already registered") from exc
+    return {**contract, "root_id": root_id, "admission_sha256": admission_sha256,
+            "inserted": True}
+
+
+def list_intake_roots(database: sqlite3.Connection) -> list[dict[str, object]]:
+    rows = database.execute(
+        "SELECT root_id,canonical_root,root_mode,purpose,allowed_suffixes,admission_sha256,admitted_at "
+        "FROM archive_intake_roots ORDER BY CASE root_mode WHEN 'DEFAULT' THEN 0 ELSE 1 END,canonical_root"
+    ).fetchall()
+    return [{"root_id": row[0], "canonical_root": row[1], "root_mode": row[2],
+             "purpose": row[3], "allowed_suffixes": list(json.loads(row[4])),
+             "admission_sha256": row[5], "admitted_at": row[6], "authority": "OBSERVE_ONLY"}
+            for row in rows]
+
+
 def admit(database: sqlite3.Connection, root: Path, records: list[FileRecord]) -> int:
     canonical_root = str(root.resolve(strict=True))
+    admission = database.execute(
+        "SELECT allowed_suffixes FROM archive_intake_roots WHERE canonical_root=?",
+        (canonical_root,),
+    ).fetchone()
+    if not admission:
+        raise ValueError("Archive root is not registered for intake")
+    allowed_suffixes = set(json.loads(admission[0]))
     admitted = 0
     for record in records:
         if not record.sha256:
             continue
+        if Path(record.relative_path).suffix.casefold() not in allowed_suffixes:
+            raise ValueError("A source file type is outside the intake-root admission")
         source_id = _source_id(canonical_root, record)
         cursor = database.execute(
             "INSERT OR IGNORE INTO review_sources("

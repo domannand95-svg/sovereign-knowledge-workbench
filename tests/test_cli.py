@@ -9,6 +9,12 @@ from sovereign_workbench.cli import main
 from sovereign_workbench.model import Classification
 
 
+def register_intake(source: Path, state: Path, capsys) -> None:
+    assert main(["archive-intake-register", str(source), "--state-db", str(state),
+                 "--purpose", "test intake", "--include", ".txt"]) == 0
+    capsys.readouterr()
+
+
 def test_stdout_scan_is_read_only(tmp_path: Path, capsys):
     (tmp_path / "document.md").write_text("# Research\nStable evidence", encoding="utf-8")
     assert main(["scan", str(tmp_path)]) == 0
@@ -48,6 +54,7 @@ def test_archive_batch_cli_resumes_and_exports_without_overwrite(tmp_path: Path,
     for index in range(3):
         (source / f"{index}.txt").write_text(f"record {index}", encoding="utf-8")
     state = tmp_path / "review.db"; output = tmp_path / "batch.csv"
+    register_intake(source, state, capsys)
     args = ["archive-batch-create", str(source), "--state-db", str(state), "--include", ".txt", "--limit", "2"]
     assert main(args) == 0
     first = json.loads(capsys.readouterr().out)
@@ -73,7 +80,9 @@ def test_archive_selection_manifest_admits_only_hash_bound_items(tmp_path: Path,
         "items": [{"relative_path": "selected.txt",
                    "sha256": hashlib.sha256(selected.read_bytes()).hexdigest()}],
     }), encoding="utf-8")
-    assert main(["archive-batch-create", str(source), "--state-db", str(tmp_path / "review.db"),
+    state = tmp_path / "review.db"
+    register_intake(source, state, capsys)
+    assert main(["archive-batch-create", str(source), "--state-db", str(state),
                  "--include", ".txt", "--selection-manifest", str(manifest)]) == 0
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["admitted"] == 1
@@ -98,6 +107,7 @@ def test_archive_local_model_candidate_binds_runtime_provenance(tmp_path: Path, 
     source = tmp_path / "source"; source.mkdir()
     (source / "selected.txt").write_text("research hypothesis", encoding="utf-8")
     state = tmp_path / "review.db"
+    register_intake(source, state, capsys)
     monkeypatch.setenv("SKW_MODEL_NAME", "test-model")
     monkeypatch.setenv("SKW_MODEL_MAX_CHARS", "4321")
     with patch("sovereign_workbench.cli.classify_with_local_model") as model:
