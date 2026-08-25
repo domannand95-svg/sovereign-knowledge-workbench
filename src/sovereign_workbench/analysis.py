@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from .model import Classification, FileRecord, Finding
+from .taxonomy import Taxonomy
 
 
 MODULE_RULES = {
@@ -27,16 +28,20 @@ RESEARCH_CUES = (
 )
 
 
-def classify(record: FileRecord) -> Classification:
+def classify(record: FileRecord, taxonomy: Taxonomy | None = None) -> Classification:
     text = (record.extracted_text or "").casefold()
-    scores = {module: sum(text.count(term) for term in terms) for module, terms in MODULE_RULES.items()}
+    rules = taxonomy.modules if taxonomy else MODULE_RULES
+    scores = {module: sum(text.count(term) for term in terms) for module, terms in rules.items()}
     module, score = max(scores.items(), key=lambda item: (item[1], item[0]))
     if score == 0:
-        module = "unclassified"
+        module = taxonomy.fallback_module if taxonomy else "unclassified"
+    elif sum(value == score for value in scores.values()) > 1:
+        module = taxonomy.fallback_module if taxonomy else "unclassified"
     confidence = min(0.95, 0.35 + score * 0.1) if score else 0.0
     labels = tuple(sorted(name for name, value in scores.items() if value > 0))
     summary = " ".join((record.extracted_text or "").split())[:280]
-    return Classification(module, confidence, labels, summary, "deterministic_heuristic")
+    source = f"taxonomy:{taxonomy.taxonomy_id}:{taxonomy.sha256}" if taxonomy else "deterministic_heuristic"
+    return Classification(module, confidence, labels, summary, source)
 
 
 def privacy_findings(record: FileRecord) -> list[Finding]:

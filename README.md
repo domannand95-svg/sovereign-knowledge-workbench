@@ -104,6 +104,25 @@ Read-only deterministic analysis to standard output:
   --routes config\routes.example.json
 ```
 
+Bind classification to a private, versioned taxonomy:
+
+```powershell
+.\.venv\Scripts\skw.exe scan C:\path\to\your\files `
+  --taxonomy C:\path\to\private-taxonomy.json
+```
+
+The contract format is illustrated by `config/taxonomy.example.json`. It is
+size-bounded, rejects unknown fields and unsupported versions, records its SHA-256
+in the review report, and sends unmatched or tied classifications to
+`manual_review`. A taxonomy selects a review queue; it does not establish maturity,
+truth, destination, or authority.
+
+Every report also carries an independent epistemic assessment. The assessment uses
+`PRODUCTION`, `NORMATIVE-SPEC`, `PROPOSED-SPEC`, `RESEARCH`, `ARCHIVE`, `EVIDENCE`,
+`HANDOVER`, or `UNKNOWN / NEEDS REVIEW`. Conflicting or absent signals fail to
+review, canonical status remains unresolved unless exact duplication is proven, and
+no destination or move decision is generated automatically.
+
 For a laptop-safe pilot over selected formats:
 
 ```powershell
@@ -217,6 +236,8 @@ $env:SKW_PYTHON = "C:\path\to\knowledge-infrastructure-bootstrap-kit\.venv\Scrip
 | `intake` | Contained inventory and immutable byte identities |
 | `extract` | Bounded local text extraction |
 | `analysis` | Classification, privacy findings, and research gaps |
+| `taxonomy` | Versioned, digest-bound private review taxonomies |
+| `epistemic` | Conservative maturity and canonical-status candidates |
 | `local_model` | Inert OpenAI-compatible classification candidates |
 | `routing` | Configured recipient review queues |
 | `adapters` | Fail-closed BKI and Sovereign process boundaries |
