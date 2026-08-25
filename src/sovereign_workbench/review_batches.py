@@ -278,3 +278,86 @@ def import_review_csv(database: sqlite3.Connection, path: Path) -> int:
     except Exception:
         database.rollback()
         raise
+
+
+def export_research_tickets(database: sqlite3.Connection, output: Path) -> int:
+    if output.exists():
+        raise ValueError("Research-ticket export already exists")
+    rows = database.execute(
+        "SELECT decision_id,source_id,topic,research_question,privacy_status,review_note "
+        "FROM archive_review_decisions WHERE decision='NEEDS_RESEARCH' ORDER BY decision_id"
+    ).fetchall()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8", newline="\n") as stream:
+        for decision_id, source_id, topic, question, privacy, note in rows:
+            ticket = {"contract_version": "sovereign.workbench.research-ticket.v1",
+                      "ticket_id": f"RQ-{decision_id[:16]}", "source_id": source_id,
+                      "module_id": topic, "question": question, "review_context": note,
+                      "privacy_status": privacy, "status": "DRAFT", "authority": "NONE",
+                      "requested_output": {"primary_sources": True, "contradictory_evidence": True,
+                                           "uncertainty": True, "direct_source_urls": True}}
+            stream.write(json.dumps(ticket, ensure_ascii=False, sort_keys=True) + "\n")
+    return len(rows)
+
+
+def export_staging_manifest(database: sqlite3.Connection, output: Path) -> dict[str, object]:
+    if output.exists():
+        raise ValueError("Staging manifest already exists")
+    rows = database.execute(
+        "SELECT d.decision_id,s.root,s.relative_path,s.source_sha256,d.topic,d.maturity "
+        "FROM archive_review_decisions d JOIN review_sources s ON s.source_id=d.source_id "
+        "WHERE d.decision='APPROVE' ORDER BY d.decision_id"
+    ).fetchall()
+    items = [{"decision_id": decision_id, "source_path": str(Path(root) / relative_path),
+              "source_sha256": digest, "proposed_relative_target": str(Path(topic) / maturity / relative_path),
+              "operation": "copy", "status": "PROPOSED", "authority_required": "filesystem.write"}
+             for decision_id, root, relative_path, digest, topic, maturity in rows]
+    value = {"contract_version": "sovereign.workbench.staging-manifest.v1", "authority": "none",
+             "execution_authorized": False, "items": items}
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    value["manifest_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
+    return value
+
+
+def export_training_split(database: sqlite3.Connection, train: Path, evaluation: Path) -> dict[str, object]:
+    if train.exists() or evaluation.exists():
+        raise ValueError("Training or evaluation export already exists")
+    rows = database.execute(
+        "SELECT d.decision_id,d.source_id,d.decision,d.topic,d.maturity,d.authority,d.confidence,"
+        "d.privacy_status,d.canonical_status,d.review_note,d.research_question,"
+        "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
+        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,'') "
+        "FROM archive_review_decisions d LEFT JOIN archive_review_candidates c ON c.source_id=d.source_id "
+        "ORDER BY d.decision_id"
+    ).fetchall()
+    if len(rows) < 5:
+        raise ValueError("At least five reviewed examples are required for a split")
+    train_rows, eval_rows = [], []
+    for row in rows:
+        (decision_id, source_id, decision, topic, maturity, authority, confidence, privacy,
+         canonical, note, question, summary, proposed_topic, proposed_maturity,
+         proposed_authority, reason) = row
+        example = {"contract_version": "sovereign.workbench.review-example.v1",
+                   "example_id": decision_id, "source_id": source_id,
+                   "input": {"summary": summary, "proposed_topic": proposed_topic,
+                             "proposed_maturity": proposed_maturity,
+                             "proposed_authority": proposed_authority, "proposal_reason": reason},
+                   "expected": {"decision": decision, "topic": topic, "maturity": maturity,
+                                "authority": authority, "confidence": confidence,
+                                "privacy_status": privacy, "canonical_status": canonical,
+                                "review_note": note, "research_question": question}}
+        bucket = int(hashlib.sha256(source_id.encode()).hexdigest()[:8], 16) % 5
+        (eval_rows if bucket == 0 else train_rows).append(example)
+    if not train_rows or not eval_rows:
+        raise ValueError("Deterministic split requires examples spanning both hash buckets")
+    for path, values in ((train, train_rows), (evaluation, eval_rows)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8", newline="\n") as stream:
+            for value in values:
+                stream.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
+    return {"train_examples": len(train_rows), "evaluation_examples": len(eval_rows),
+            "train_sha256": hashlib.sha256(train.read_bytes()).hexdigest(),
+            "evaluation_sha256": hashlib.sha256(evaluation.read_bytes()).hexdigest()}

@@ -1,11 +1,14 @@
 from pathlib import Path
 import sqlite3
 import csv
+import json
 
 import pytest
 
 from sovereign_workbench.intake import scan_files
-from sovereign_workbench.review_batches import admit, connect, counts, create_next, export_review_csv, import_review_csv, store_candidates
+from sovereign_workbench.review_batches import (admit, connect, counts, create_next, export_review_csv,
+    import_review_csv, store_candidates, export_research_tickets, export_staging_manifest,
+    export_training_split)
 
 
 def make_files(root: Path, count: int) -> None:
@@ -103,3 +106,35 @@ def test_candidate_population_is_immutable_and_exported(tmp_path: Path):
         assert store_candidates(database, batch["batch_id"], [candidate]) == 0
         export_review_csv(database, batch["batch_id"], output)
         assert "Bounded summary" in output.read_text(encoding="utf-8-sig")
+
+
+def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 20)
+    review = tmp_path / "review.csv"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database, limit=20)
+        export_review_csv(database, batch["batch_id"], review)
+        with review.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
+        for index, row in enumerate(rows):
+            row.update({"decision": "NEEDS_RESEARCH" if index == 0 else "APPROVE",
+                        "topic": "Other", "maturity": "Research",
+                        "authority": "No authority", "confidence": "LOW",
+                        "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
+                        "review_note": "Human reviewed", "reviewer": "Dominic",
+                        "research_question": "What evidence supports this?" if index == 0 else ""})
+        with review.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        assert import_review_csv(database, review) == 20
+        tickets = tmp_path / "tickets.jsonl"
+        assert export_research_tickets(database, tickets) == 1
+        assert json.loads(tickets.read_text(encoding="utf-8").strip())["authority"] == "NONE"
+        manifest = export_staging_manifest(database, tmp_path / "manifest.json")
+        assert manifest["execution_authorized"] is False
+        assert len(manifest["items"]) == 19
+        assert all(item["status"] == "PROPOSED" for item in manifest["items"])
+        result = export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
+        assert result["train_examples"] + result["evaluation_examples"] == 20
+        train_ids = {json.loads(line)["source_id"] for line in (tmp_path / "train.jsonl").read_text(encoding="utf-8").splitlines()}
+        eval_ids = {json.loads(line)["source_id"] for line in (tmp_path / "eval.jsonl").read_text(encoding="utf-8").splitlines()}
+        assert train_ids.isdisjoint(eval_ids)

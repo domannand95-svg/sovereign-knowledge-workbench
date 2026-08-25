@@ -19,6 +19,7 @@ from .staging import (StagingError, build_plan as build_stage_plan, connect as c
 from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
                              counts as review_batch_counts, create_next as create_review_batch,
                              export_review_csv, import_review_csv, store_candidates)
+from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .intake import scan_files
 from .analysis import classify
 from .epistemic import assess
@@ -113,6 +114,13 @@ def parser() -> argparse.ArgumentParser:
     batch_import.add_argument("review_csv", type=Path); batch_import.add_argument("--state-db", required=True, type=Path)
     batch_status = commands.add_parser("archive-batch-status", help="Show durable archive review counts")
     batch_status.add_argument("--state-db", required=True, type=Path)
+    research_export = commands.add_parser("archive-research-export", help="Export approved draft research tickets")
+    research_export.add_argument("--state-db", required=True, type=Path); research_export.add_argument("--output", required=True, type=Path)
+    manifest_export = commands.add_parser("archive-staging-manifest", help="Export an inert hash-bound staging manifest")
+    manifest_export.add_argument("--state-db", required=True, type=Path); manifest_export.add_argument("--output", required=True, type=Path)
+    dataset_export = commands.add_parser("archive-dataset-export", help="Export deterministic reviewed train/evaluation splits")
+    dataset_export.add_argument("--state-db", required=True, type=Path); dataset_export.add_argument("--train", required=True, type=Path)
+    dataset_export.add_argument("--evaluation", required=True, type=Path)
     return root
 
 
@@ -235,6 +243,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "archive-batch-status":
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps(review_batch_counts(database), sort_keys=True))
+            return 0
+        if args.command == "archive-research-export":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({"tickets": export_research_tickets(database, args.output), "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-staging-manifest":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(export_staging_manifest(database, args.output), sort_keys=True))
+            return 0
+        if args.command == "archive-dataset-export":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(export_training_split(database, args.train, args.evaluation), sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file
