@@ -214,6 +214,65 @@ def export_review_csv(database: sqlite3.Connection, batch_id: str, output: Path)
     return output
 
 
+def export_review_xlsx(database: sqlite3.Connection, batch_id: str, output: Path) -> Path:
+    if output.exists():
+        raise ValueError("Review workbook already exists; prior exports are never overwritten")
+    try:
+        import xlsxwriter
+    except ImportError as exc:
+        raise ValueError("Excel export requires installation with the 'excel' extra") from exc
+    rows = database.execute(
+        "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status,"
+        "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
+        "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,'') "
+        "FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
+        "LEFT JOIN archive_review_candidates c ON c.source_id=s.source_id "
+        "WHERE i.batch_id=? ORDER BY i.ordinal", (batch_id,),
+    ).fetchall()
+    if not rows:
+        raise ValueError("Unknown or empty review batch")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    workbook = xlsxwriter.Workbook(str(output), {"constant_memory": True})
+    try:
+        sheet = workbook.add_worksheet("Review Ledger")
+        header = workbook.add_format({"bold": True, "font_color": "white", "bg_color": "#17365D",
+                                      "text_wrap": True, "valign": "top"})
+        wrap = workbook.add_format({"text_wrap": True, "valign": "top"})
+        sheet.hide_gridlines(2); sheet.freeze_panes(1, 1); sheet.autofilter(0, 0, len(rows), len(REVIEW_COLUMNS)-1)
+        for column, name in enumerate(REVIEW_COLUMNS): sheet.write(0, column, name, header)
+        defaults = {"decision": "NEEDS_RESEARCH", "topic": "Needs review", "maturity": "Needs review",
+                    "authority": "Needs review", "confidence": "UNKNOWN", "privacy_status": "Needs review",
+                    "canonical_status": "UNRESOLVED"}
+        for row_number, row in enumerate(rows, start=1):
+            source_id, path, digest, modified_ns, extraction, summary, topic, maturity, authority, reason = row
+            value = {column: "" for column in REVIEW_COLUMNS}
+            value.update(defaults); value.update({"batch_id": batch_id, "source_id": source_id,
+                "source_path": path, "source_sha256": digest, "modified_ns": modified_ns,
+                "extraction_status": extraction, "model_summary": summary, "proposed_topic": topic,
+                "proposed_maturity": maturity, "proposed_authority": authority, "proposal_reason": reason})
+            for column, name in enumerate(REVIEW_COLUMNS): sheet.write(row_number, column, value[name], wrap)
+        sheet.set_column(0, 1, 18); sheet.set_column(2, 2, 52); sheet.set_column(3, 4, 18)
+        sheet.set_column(5, len(REVIEW_COLUMNS)-1, 20)
+        last = len(rows) + 1
+        sheet.data_validation(f"L2:L{last}", {"validate": "list", "source": sorted(DECISIONS)})
+        sheet.data_validation(f"M2:M{last}", {"validate": "list", "source": sorted(TOPICS)})
+        sheet.data_validation(f"N2:N{last}", {"validate": "list", "source": sorted(MATURITIES)})
+        sheet.data_validation(f"O2:O{last}", {"validate": "list", "source": sorted(AUTHORITIES)})
+        sheet.data_validation(f"P2:P{last}", {"validate": "list", "source": ["HIGH", "MEDIUM", "LOW", "UNKNOWN"]})
+        summary_sheet = workbook.add_worksheet("Instructions")
+        summary_sheet.hide_gridlines(2); summary_sheet.set_column("A:A", 28); summary_sheet.set_column("B:B", 80)
+        summary_sheet.write("A1", "Control", header); summary_sheet.write("B1", "Meaning", header)
+        instructions = [("Authority", "Model and workbook outputs are candidates only."),
+                        ("Review", "Complete decision, topic, maturity, authority, confidence, privacy, canonical status, note, and reviewer."),
+                        ("Research", "NEEDS_RESEARCH requires a precise research question before import."),
+                        ("Files", "No source file is moved, renamed, deleted, or published by this workbook.")]
+        for index, pair in enumerate(instructions, start=1):
+            summary_sheet.write_row(index, 0, pair, wrap)
+    finally:
+        workbook.close()
+    return output
+
+
 def store_candidates(database: sqlite3.Connection, batch_id: str, candidates: list[dict[str, str]]) -> int:
     stored = 0
     for candidate in candidates:
@@ -336,7 +395,7 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
     if len(rows) < 5:
         raise ValueError("At least five reviewed examples are required for a split")
     train_rows, eval_rows = [], []
-    for row in rows:
+    for index, row in enumerate(sorted(rows, key=lambda value: value[1])):
         (decision_id, source_id, decision, topic, maturity, authority, confidence, privacy,
          canonical, note, question, summary, proposed_topic, proposed_maturity,
          proposed_authority, reason) = row
@@ -349,8 +408,7 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
                                 "authority": authority, "confidence": confidence,
                                 "privacy_status": privacy, "canonical_status": canonical,
                                 "review_note": note, "research_question": question}}
-        bucket = int(hashlib.sha256(source_id.encode()).hexdigest()[:8], 16) % 5
-        (eval_rows if bucket == 0 else train_rows).append(example)
+        (eval_rows if index % 5 == 0 else train_rows).append(example)
     if not train_rows or not eval_rows:
         raise ValueError("Deterministic split requires examples spanning both hash buckets")
     for path, values in ((train, train_rows), (evaluation, eval_rows)):

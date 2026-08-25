@@ -18,7 +18,7 @@ from .staging import (StagingError, build_plan as build_stage_plan, connect as c
                       status_counts as staging_status_counts)
 from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
                              counts as review_batch_counts, create_next as create_review_batch,
-                             export_review_csv, import_review_csv, store_candidates)
+                             export_review_csv, export_review_xlsx, import_review_csv, store_candidates)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .intake import scan_files
 from .analysis import classify
@@ -110,6 +110,7 @@ def parser() -> argparse.ArgumentParser:
     batch_export = commands.add_parser("archive-batch-export", help="Export a non-overwriting review CSV")
     batch_export.add_argument("batch_id"); batch_export.add_argument("--state-db", required=True, type=Path)
     batch_export.add_argument("--output", required=True, type=Path)
+    batch_export.add_argument("--xlsx", action="store_true", help="Export a formatted Excel review workbook")
     batch_import = commands.add_parser("archive-review-import", help="Import hash-bound human review decisions")
     batch_import.add_argument("review_csv", type=Path); batch_import.add_argument("--state-db", required=True, type=Path)
     batch_status = commands.add_parser("archive-batch-status", help="Show durable archive review counts")
@@ -232,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "archive-batch-export":
             with connect_review_batches(args.state_db) as database:
-                exported = export_review_csv(database, args.batch_id, args.output)
+                exported = (export_review_xlsx if args.xlsx else export_review_csv)(database, args.batch_id, args.output)
                 print(json.dumps({"output": str(exported.resolve()), "authority": "none"}, sort_keys=True))
             return 0
         if args.command == "archive-review-import":

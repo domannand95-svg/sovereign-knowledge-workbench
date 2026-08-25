@@ -2,12 +2,13 @@ from pathlib import Path
 import sqlite3
 import csv
 import json
+import zipfile
 
 import pytest
 
 from sovereign_workbench.intake import scan_files
 from sovereign_workbench.review_batches import (admit, connect, counts, create_next, export_review_csv,
-    import_review_csv, store_candidates, export_research_tickets, export_staging_manifest,
+    import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
     export_training_split)
 
 
@@ -138,3 +139,16 @@ def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path)
         train_ids = {json.loads(line)["source_id"] for line in (tmp_path / "train.jsonl").read_text(encoding="utf-8").splitlines()}
         eval_ids = {json.loads(line)["source_id"] for line in (tmp_path / "eval.jsonl").read_text(encoding="utf-8").splitlines()}
         assert train_ids.isdisjoint(eval_ids)
+
+
+def test_formatted_excel_export_is_valid_and_non_overwriting(tmp_path: Path):
+    source = tmp_path / "source"; source.mkdir(); make_files(source, 2)
+    output = tmp_path / "review.xlsx"
+    with connect(tmp_path / "state.db") as database:
+        admit(database, source, scan_files(source)); batch = create_next(database)
+        assert export_review_xlsx(database, batch["batch_id"], output) == output
+        with zipfile.ZipFile(output) as archive:
+            assert "xl/workbook.xml" in archive.namelist()
+            assert b"Review Ledger" in archive.read("xl/workbook.xml")
+        with pytest.raises(ValueError, match="never overwritten"):
+            export_review_xlsx(database, batch["batch_id"], output)
