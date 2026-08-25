@@ -1,0 +1,10 @@
+{
+  "contract_version": "sovereign.workbench.taxonomy.v1",
+  "taxonomy_id": "example-private-workspace",
+  "fallback_module": "manual_review",
+  "modules": {
+    "governance": ["policy", "authorization boundary", "audit receipt"],
+    "research": ["research question", "literature review", "hypothesis"],
+    "evidence": ["measurement record", "dataset", "experimental result"]
+  }
+}
