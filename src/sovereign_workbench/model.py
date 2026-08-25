@@ -43,14 +43,30 @@ class ActionProposal:
     status: str = "proposed"
 
 
+@dataclass(frozen=True)
+class ArtifactAssessment:
+    category: str
+    maturity: str
+    canonical_status: str
+    authority_status: str
+    recommended_destination: str | None
+    move_required: str
+    semantic_drift_risk: str
+    reason: str
+    source: str
+
+
 @dataclass
 class WorkbenchReport:
     contract_version: str
     root: str
     generated_at_utc: str
+    taxonomy_contract: str | None = None
+    taxonomy_sha256: str | None = None
     files: list[FileRecord] = field(default_factory=list)
     duplicate_groups: list[list[str]] = field(default_factory=list)
     classifications: dict[str, Classification] = field(default_factory=dict)
+    artifact_assessments: dict[str, ArtifactAssessment] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
     proposals: list[ActionProposal] = field(default_factory=list)
     research_queue: list[dict[str, str]] = field(default_factory=list)

@@ -25,6 +25,7 @@ def parser() -> argparse.ArgumentParser:
     scan = commands.add_parser("scan", help="Analyze files without changing them")
     scan.add_argument("root", type=Path)
     scan.add_argument("--routes", type=Path)
+    scan.add_argument("--taxonomy", type=Path, help="Versioned deterministic classification taxonomy")
     scan.add_argument("--local-model", action="store_true")
     scan.add_argument("--max-file-mb", type=int, default=50)
     scan.add_argument("--max-files", type=int)
@@ -210,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             max_file_bytes=args.max_file_mb * 1024 * 1024,
             include_suffixes={value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include} if args.include else None,
             max_files=args.max_files,
+            taxonomy_path=args.taxonomy,
         )
         package = build_review_package(report)
         if args.output:

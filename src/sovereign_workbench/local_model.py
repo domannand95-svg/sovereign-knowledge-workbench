@@ -28,12 +28,21 @@ class LocalModelConfig:
         )
 
 
-def classify_with_local_model(record: FileRecord, config: LocalModelConfig) -> Classification:
+def classify_with_local_model(
+    record: FileRecord,
+    config: LocalModelConfig,
+    *,
+    allowed_modules: list[str] | None = None,
+) -> Classification:
     if not config.model:
         raise ModelError("SKW_MODEL_NAME is required for model classification")
+    modules = allowed_modules or [
+        "governance", "research", "evidence", "correspondence", "finance", "legal", "unclassified"
+    ]
     prompt = {
         "task": "Classify this document without proposing or performing actions",
-        "allowed_modules": ["governance", "research", "evidence", "correspondence", "finance", "legal", "unclassified"],
+        "allowed_modules": modules,
+        "abstention_rule": "Use the final allowed module when evidence is absent, conflicting, or ambiguous",
         "required_json": {"module": "string", "confidence": "0..1", "labels": ["string"], "summary": "string"},
         "path": record.relative_path,
         "sha256": record.sha256,
@@ -55,7 +64,7 @@ def classify_with_local_model(record: FileRecord, config: LocalModelConfig) -> C
         raw = envelope["choices"][0]["message"]["content"]
         value = json.loads(raw)
         module = value["module"]
-        if module not in prompt["allowed_modules"]:
+        if module not in modules:
             raise ModelError("Model returned an unknown module")
         confidence = float(value["confidence"])
         if not 0 <= confidence <= 1:

@@ -4,10 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .analysis import classify, privacy_findings, research_gaps
+from .epistemic import assess
 from .intake import duplicate_groups, scan_files
 from .local_model import LocalModelConfig, ModelError, classify_with_local_model
 from .model import ActionProposal, Finding, WorkbenchReport
 from .routing import load_routes, route_candidate
+from .taxonomy import load_taxonomy
 
 
 def analyze_workspace(
@@ -18,7 +20,9 @@ def analyze_workspace(
     max_file_bytes: int = 50 * 1024 * 1024,
     include_suffixes: set[str] | None = None,
     max_files: int | None = None,
+    taxonomy_path: Path | None = None,
 ) -> WorkbenchReport:
+    taxonomy = load_taxonomy(taxonomy_path) if taxonomy_path else None
     records = scan_files(
         root,
         max_file_bytes=max_file_bytes,
@@ -29,6 +33,8 @@ def analyze_workspace(
         contract_version="sovereign.workbench.report.v1",
         root=str(root.resolve()),
         generated_at_utc=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        taxonomy_contract=taxonomy.contract_version if taxonomy else None,
+        taxonomy_sha256=taxonomy.sha256 if taxonomy else None,
         files=records,
         duplicate_groups=duplicate_groups(records),
     )
@@ -37,15 +43,21 @@ def analyze_workspace(
 
     duplicate_paths = {path for group in report.duplicate_groups for path in group[1:]}
     for record in records:
-        classification = classify(record)
+        classification = classify(record, taxonomy)
         if use_local_model and record.extracted_text:
             try:
-                classification = classify_with_local_model(record, model_config)
+                allowed_modules = [*taxonomy.modules, taxonomy.fallback_module] if taxonomy else None
+                classification = classify_with_local_model(
+                    record, model_config, allowed_modules=allowed_modules,
+                )
             except ModelError as exc:
                 report.findings.append(Finding(
                     "model_failure", "medium", str(exc), record.relative_path,
                 ))
         report.classifications[record.relative_path] = classification
+        report.artifact_assessments[record.relative_path] = assess(
+            record, exact_duplicate=record.relative_path in duplicate_paths,
+        )
         file_findings = privacy_findings(record)
         report.findings.extend(file_findings)
         report.research_queue.extend(research_gaps(record))
