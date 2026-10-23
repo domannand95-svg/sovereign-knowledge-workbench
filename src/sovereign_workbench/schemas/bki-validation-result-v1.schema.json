@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/domannand95-svg/knowledge-infrastructure-bootstrap-kit/blob/main/docs/integration/bki-validation-result-v1.schema.json",
+  "title": "BKI Validation Result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "validator_version",
+    "executed_at_utc",
+    "source_sha256",
+    "candidate_sha256",
+    "source_document_id",
+    "candidate_document_id",
+    "outcome",
+    "error_code",
+    "classification_log",
+    "diff"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "bki.validation.v1"
+    },
+    "validator_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "executed_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "candidate_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_document_id": {
+      "type": ["string", "null"]
+    },
+    "candidate_document_id": {
+      "type": ["string", "null"]
+    },
+    "outcome": {
+      "enum": [
+        "PASS — COMPLIANT",
+        "PASS — NORMALIZED",
+        "FAIL — QUARANTINE"
+      ]
+    },
+    "error_code": {
+      "enum": [
+        null,
+        "ERR_FM_SYNTAX",
+        "ERR_H1_VIOLATION",
+        "ERR_HEADING_NEST",
+        "ERR_PROTECTED_CONTENT",
+        "ERR_PROSE_MUTATION",
+        "ERR_UNAUTHORIZED_DELTA"
+      ]
+    },
+    "classification_log": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_]+\\|(NONE|AUTHORIZED|PRESERVED|REJECTED|COMPLIANT|NORMALIZED|QUARANTINE)\\|.+$"
+      }
+    },
+    "diff": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

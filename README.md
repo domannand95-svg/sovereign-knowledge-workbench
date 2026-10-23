@@ -236,7 +236,13 @@ shortcut. See `docs/OPERATOR_GUIDE.md`, `docs/SECURITY.md`, and
 
 ## BKI validation
 
+Install the `bki` extra in the Workbench environment. The adapter validates the
+unchanged `bki.validation.v1` schema packaged with Workbench and independently
+checks source and candidate hashes before accepting a result. Input changes
+during validation fail closed.
+
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[bki]"
 $env:SKW_PYTHON = "C:\path\to\knowledge-infrastructure-bootstrap-kit\.venv\Scripts\python.exe"
 .\.venv\Scripts\skw.exe bki-validate `
   --source C:\path\to\source.md `
