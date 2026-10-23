@@ -11,7 +11,8 @@ dependencies = ["cryptography>=50,<51"]
 
 [project.optional-dependencies]
 pdf = ["pypdf>=5,<7"]
-dev = ["pytest>=8,<10"]
+dev = ["pytest>=8,<10", "jsonschema==4.25.1"]
+bki = ["jsonschema==4.25.1"]
 excel = ["XlsxWriter>=3.2,<4"]
 plugins = ["sovereign-workbench-plugins @ git+https://github.com/domannand95-svg/sovereign-workbench-plugins.git@a7ac7279f4d3610908847f7af1c383e49a853198"]
 
@@ -22,6 +23,9 @@ skw-local-review = "sovereign_workbench.local_review_web:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+sovereign_workbench = ["schemas/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

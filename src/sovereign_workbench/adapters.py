@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import shlex
 import subprocess
 import sqlite3
 import secrets
 from datetime import datetime, timezone
+from importlib.resources import files
 from pathlib import Path
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -29,9 +31,37 @@ def _receipt_payload(receipt: dict) -> bytes:
 
 
 def validate_with_bki(source: Path, candidate: Path, bki_root: Path) -> dict:
+    try:
+        from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+    except ImportError as exc:
+        raise AdapterError("BKI validation requires the Workbench 'bki' extra") from exc
+    schema = json.loads(
+        files("sovereign_workbench").joinpath("schemas/bki-validation-result-v1.schema.json")
+        .read_text(encoding="utf-8")
+    )
+    checker = FormatChecker()
+
+    @checker.checks("date-time", raises=ValueError)
+    def date_time(value: object) -> bool:
+        # jsonschema's optional RFC 3339 dependency is not required by BKI.
+        # Enforce this schema's sole format using the standard library.
+        if not isinstance(value, str):
+            return True
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})", value):
+            return False
+        return datetime.fromisoformat(value.upper().replace("Z", "+00:00")).tzinfo is not None
+
+    validator = Draft202012Validator(schema, format_checker=checker)
+    source, candidate = source.resolve(strict=True), candidate.resolve(strict=True)
+
+    def digest(path: Path) -> str:
+        with path.open("rb") as stream:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+
+    expected_source, expected_candidate = digest(source), digest(candidate)
     command = [
         os.environ.get("SKW_PYTHON", "python"), "-m", "tooling.normalization.cli",
-        "--source", str(source.resolve()), "--candidate", str(candidate.resolve()),
+        "--source", str(source), "--candidate", str(candidate),
         "--format", "bki.validation.v1",
     ]
     completed = subprocess.run(command, cwd=bki_root.resolve(), capture_output=True, timeout=30, check=False)
@@ -41,8 +71,15 @@ def validate_with_bki(source: Path, candidate: Path, bki_root: Path) -> dict:
         result = json.loads(completed.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AdapterError("BKI returned malformed output") from exc
-    if result.get("contract_version") != "bki.validation.v1":
-        raise AdapterError("BKI contract identity mismatch")
+    try:
+        validator.validate(result)
+    except ValidationError as exc:
+        raise AdapterError("BKI result failed schema validation") from exc
+    if (result["source_sha256"] != expected_source
+            or result["candidate_sha256"] != expected_candidate):
+        raise AdapterError("BKI result does not match source and candidate hashes")
+    if digest(source) != expected_source or digest(candidate) != expected_candidate:
+        raise AdapterError("BKI inputs changed during validation")
     return result
 
 
