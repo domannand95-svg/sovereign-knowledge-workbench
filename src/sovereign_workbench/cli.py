@@ -15,7 +15,7 @@ from .reviews import admit_completed, decide, list_candidates, verify_decisions
 from .scheduler import connect_schedule, enqueue_schedule, load_workers, run_pending_schedule, run_schedule, schedule_counts
 from .staging import (StagingError, build_plan as build_stage_plan, connect as connect_staging,
                       execute as execute_stage, recover as recover_staging, rollback as rollback_stage,
-                      status_counts as staging_status_counts)
+                      status_counts as staging_status_counts, prepare_retry, validate_execution_preconditions)
 from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
                              counts as review_batch_counts, create_next as create_review_batch,
                              export_review_csv, export_review_xlsx, import_review_csv,
@@ -124,6 +124,10 @@ def parser() -> argparse.ArgumentParser:
     stage_plan = commands.add_parser("stage-plan", help="Create a non-authoritative immutable staging plan")
     stage_plan.add_argument("source", type=Path); stage_plan.add_argument("--staging-root", required=True, type=Path)
     stage_plan.add_argument("--max-file-mb", type=int, default=100)
+    retry_plan = commands.add_parser("stage-retry-plan", help="Record a linked retry proposal without execution authority")
+    retry_plan.add_argument("parent_plan_id")
+    retry_plan.add_argument("--state-db", required=True, type=Path)
+    retry_plan.add_argument("--reason", required=True)
     stage_execute = commands.add_parser("stage-execute", help="Request authorization and copy into reversible staging")
     stage_execute.add_argument("--plan", required=True, type=Path); stage_execute.add_argument("--state-db", required=True, type=Path)
     stage_execute.add_argument("--max-file-mb", type=int, default=100)
@@ -225,11 +229,16 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(build_stage_plan(args.source, args.staging_root,
                 max_bytes=args.max_file_mb * 1024 * 1024), sort_keys=True))
             return 0
+        if args.command == "stage-retry-plan":
+            with connect_staging(args.state_db) as database:
+                print(json.dumps(prepare_retry(database, args.parent_plan_id, reason=args.reason), sort_keys=True))
+            return 0
         if args.command == "stage-execute":
             plan = json.loads(args.plan.read_text(encoding="utf-8"))
-            receipt = request_sovereign_authorization({"operation":"stage_copy",
-                "target":plan.get("staged_path"), "report_sha256":plan.get("plan_id")})
             with connect_staging(args.state_db) as database:
+                validate_execution_preconditions(database, plan)
+                receipt = request_sovereign_authorization({"operation":"stage_copy",
+                    "target":plan.get("staged_path"), "report_sha256":plan.get("plan_id")})
                 print(json.dumps(execute_stage(database, plan, receipt,
                     max_bytes=args.max_file_mb * 1024 * 1024), sort_keys=True))
             return 0
