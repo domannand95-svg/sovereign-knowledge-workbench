@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .plugins import PluginRuntimeError, run_plugin
+from .runner_ownership import exclusive_runner, OwnershipLostError
 
 
 SCHEMA = """
@@ -18,6 +19,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   max_bytes INTEGER NOT NULL DEFAULT 104857600,
   status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed')),
   attempts INTEGER NOT NULL DEFAULT 0,
+  runner_token TEXT,
   result_json TEXT,
   error TEXT,
   created_at TEXT NOT NULL,
@@ -38,6 +40,8 @@ def connect(path: Path) -> sqlite3.Connection:
     columns = {row[1] for row in database.execute("PRAGMA table_info(jobs)")}
     if "max_bytes" not in columns:
         database.execute("ALTER TABLE jobs ADD COLUMN max_bytes INTEGER NOT NULL DEFAULT 104857600")
+    if "runner_token" not in columns:
+        database.execute("ALTER TABLE jobs ADD COLUMN runner_token TEXT")
     database.execute("PRAGMA journal_mode=WAL")
     from .reviews import install
     install(database)
@@ -65,8 +69,13 @@ def enqueue(
 
 
 def recover_interrupted(database: sqlite3.Connection) -> int:
+    with exclusive_runner(database):
+        return _recover_interrupted_owned(database)
+
+
+def _recover_interrupted_owned(database: sqlite3.Connection) -> int:
     cursor = database.execute(
-        "UPDATE jobs SET status='pending', error='interrupted_before_completion', updated_at=? WHERE status='running'",
+        "UPDATE jobs SET status='pending', runner_token=NULL, error='interrupted_before_completion', updated_at=? WHERE status='running'",
         (_now(),),
     )
     database.commit()
@@ -74,34 +83,42 @@ def recover_interrupted(database: sqlite3.Connection) -> int:
 
 
 def run_pending(database: sqlite3.Connection, *, limit: int = 25) -> dict[str, int]:
-    recover_interrupted(database)
+    with exclusive_runner(database) as token:
+        return _run_pending_owned(database, limit=limit, token=token)
+
+
+def _run_pending_owned(database, *, limit, token):
+    _recover_interrupted_owned(database)
     rows = database.execute(
         "SELECT job_id,plugin_id,source_path,source_sha256,max_bytes FROM jobs WHERE status='pending' ORDER BY created_at,job_id LIMIT ?",
         (limit,),
     ).fetchall()
     counts = {"completed": 0, "failed": 0}
     for job_id, plugin_id, source_path, expected_hash, max_bytes in rows:
-        database.execute(
-            "UPDATE jobs SET status='running', attempts=attempts+1, updated_at=? WHERE job_id=? AND status='pending'",
-            (_now(), job_id),
+        claim = database.execute(
+            "UPDATE jobs SET status='running', attempts=attempts+1, runner_token=?, updated_at=? WHERE job_id=? AND status='pending'",
+            (token, _now(), job_id),
         )
         database.commit()
+        if claim.rowcount != 1:
+            continue
         try:
             result = run_plugin(plugin_id, Path(source_path), max_bytes=max_bytes)
             if result["input_sha256"] != expected_hash:
                 raise PluginRuntimeError("Source changed after job admission")
-            database.execute(
-                "UPDATE jobs SET status='completed',result_json=?,error=NULL,updated_at=? WHERE job_id=?",
-                (json.dumps(result, sort_keys=True), _now(), job_id),
-            )
-            counts["completed"] += 1
+            status, encoded, error = "completed", json.dumps(result, sort_keys=True), None
         except (OSError, PluginRuntimeError, ValueError) as exc:
-            database.execute(
-                "UPDATE jobs SET status='failed',error=?,updated_at=? WHERE job_id=?",
-                (str(exc)[:1000], _now(), job_id),
-            )
-            counts["failed"] += 1
+            status, encoded, error = "failed", None, str(exc)[:1000]
+        completion = database.execute(
+            "UPDATE jobs SET status=?,result_json=?,error=?,runner_token=NULL,updated_at=? "
+            "WHERE job_id=? AND status='running' AND runner_token=?",
+            (status, encoded, error, _now(), job_id, token),
+        )
+        if completion.rowcount != 1:
+            database.rollback()
+            raise OwnershipLostError("Job ownership changed before completion")
         database.commit()
+        counts[status] += 1
     return counts
 
 

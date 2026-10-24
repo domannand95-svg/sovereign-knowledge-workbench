@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .runner_ownership import exclusive_runner, OwnershipLostError
+
 
 class SchedulerError(RuntimeError):
     pass
@@ -112,6 +114,7 @@ CREATE TABLE IF NOT EXISTS model_jobs (
   worker_json TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed')),
   attempts INTEGER NOT NULL DEFAULT 0,
+  runner_token TEXT,
   result_json TEXT,
   error TEXT
 );
@@ -122,6 +125,9 @@ def connect_schedule(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     database = sqlite3.connect(path)
     database.executescript(MODEL_SCHEMA)
+    columns = {row[1] for row in database.execute("PRAGMA table_info(model_jobs)")}
+    if "runner_token" not in columns:
+        database.execute("ALTER TABLE model_jobs ADD COLUMN runner_token TEXT")
     database.execute("PRAGMA journal_mode=WAL")
     return database
 
@@ -146,9 +152,16 @@ def enqueue_schedule(database: sqlite3.Connection, tasks: list[dict], workers: l
 
 def run_pending_schedule(database: sqlite3.Connection, *, max_concurrency: int,
                          limit: int = 100, invoke: Callable[[dict, ModelWorker], dict] = _invoke) -> dict[str, int]:
+    with exclusive_runner(database) as token:
+        return _run_pending_schedule_owned(database, max_concurrency=max_concurrency,
+                                           limit=limit, invoke=invoke, token=token)
+
+
+def _run_pending_schedule_owned(database, *, max_concurrency, limit, invoke, token):
     if limit < 1 or limit > 1000:
         raise SchedulerError("Model run limit must be between 1 and 1000")
-    database.execute("UPDATE model_jobs SET status='pending',error='interrupted_before_completion' WHERE status='running'")
+    database.execute("UPDATE model_jobs SET status='pending',runner_token=NULL,error='interrupted_before_completion' WHERE status='running'")
+    database.commit()
     rows = database.execute(
         "SELECT task_id,task_json,worker_json FROM model_jobs WHERE status='pending' ORDER BY task_id LIMIT ?", (limit,)
     ).fetchall()
@@ -157,8 +170,12 @@ def run_pending_schedule(database: sqlite3.Connection, *, max_concurrency: int,
         task = json.loads(task_json); value = json.loads(worker_json)
         worker = ModelWorker(value["worker_id"], value["model"], tuple(value["roles"]), value["endpoint"],
                              value["timeout_seconds"], value["max_response_bytes"])
-        database.execute("UPDATE model_jobs SET status='running',attempts=attempts+1 WHERE task_id=?", (task_id,))
-        assignments.append((task, worker))
+        claim = database.execute(
+            "UPDATE model_jobs SET status='running',attempts=attempts+1,runner_token=? "
+            "WHERE task_id=? AND status='pending'", (token, task_id))
+        database.commit()
+        if claim.rowcount == 1:
+            assignments.append((task, worker))
     database.commit()
     results = run_schedule([task for task, _ in assignments], [worker for _, worker in assignments],
                            max_concurrency=max_concurrency, invoke=lambda task, _worker: invoke(
@@ -166,9 +183,13 @@ def run_pending_schedule(database: sqlite3.Connection, *, max_concurrency: int,
     counts = {"completed": 0, "failed": 0}
     for result in results:
         status = "completed" if result["status"] == "candidate" else "failed"
-        database.execute("UPDATE model_jobs SET status=?,result_json=?,error=? WHERE task_id=?",
+        completion = database.execute("UPDATE model_jobs SET status=?,result_json=?,error=?,runner_token=NULL WHERE task_id=? AND status='running' AND runner_token=?",
             (status, json.dumps(result, sort_keys=True) if status == "completed" else None,
-             result.get("error") if status == "failed" else None, result["task_id"]))
+             result.get("error") if status == "failed" else None, result["task_id"], token))
+        if completion.rowcount != 1:
+            database.rollback()
+            raise OwnershipLostError("Model job ownership changed before completion")
+        database.commit()
         counts[status] += 1
     database.commit()
     return counts
