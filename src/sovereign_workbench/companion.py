@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import secrets
+import sys
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from .adapters import AdapterError, request_sovereign_authorization
-from .session_publication import publish as publish_session_file
+from .session_publication import publish as publish_session_file, remove_published
 from .jobs import connect as connect_jobs
 from .reviews import list_candidates, verify_decisions
 from .staging import (StagingError, build_plan, connect as connect_staging,
@@ -325,11 +326,23 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def _write_session_file(path: Path, session: dict) -> None:
+def _write_session_file(path: Path, session: dict):
     # Restrict before any token byte is written, verify through the created
     # descriptor/handle, refuse untrusted parents, and clean up only what this
-    # call created. See session_publication for the platform mechanisms.
-    publish_session_file(path, session)
+    # call created. Returns a receipt naming the exact file created.
+    return publish_session_file(path, session)
+
+
+def _remove_session_file(path: Path, receipt) -> None:
+    # Remove the session file only while it is still the file this run created;
+    # a replacement at the same path is left untouched and reported.
+    try:
+        outcome = remove_published(path, receipt)
+    except OSError as error:
+        print(f"companion: session file not removed: {error!r}", file=sys.stderr, flush=True)
+        return
+    if outcome not in ("removed", "absent"):
+        print(f"companion: session file left in place ({outcome}): {path}", file=sys.stderr, flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -346,9 +359,10 @@ def main(argv: list[str] | None = None) -> int:
                "contract_version": CONTRACT_VERSION, "authority": "none",
                "pid": os.getpid(), "token_ttl_seconds": config.token_ttl_seconds}
     session_written = False
+    receipt = None
     try:
         if args.session_file:
-            _write_session_file(args.session_file, session)
+            receipt = _write_session_file(args.session_file, session)
             session_written = True
         print(json.dumps(session), flush=True)
         server.serve_forever()
@@ -359,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
             server.server_close()
         finally:
             if session_written:
-                args.session_file.unlink(missing_ok=True)
+                _remove_session_file(args.session_file, receipt)
     return 0
 
 

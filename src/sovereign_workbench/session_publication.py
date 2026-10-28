@@ -11,7 +11,13 @@ Required properties (R3 diagnostics, 28 Oct 2026):
 * cleanup removes only the object this call created, and cleanup failures
   are reported rather than hidden;
 * the parent directory must be a trusted location, otherwise publication is
-  refused (fail closed). Folder permissions are never changed here.
+  refused (fail closed). Folder permissions are never changed here;
+* missing parent folders are created only after the nearest existing ancestor
+  passed the trust check (POSIX: one at a time, mode 0700);
+* publication returns a receipt naming the exact file created, and
+  ``remove_published`` removes the file only while it is still that file;
+* Windows: only fixed local drives whose DOS device is a real ``\\Device\\``
+  target are accepted (SUBST, mapped and network drives are refused).
 
 The Windows native layer (``WindowsNative``) has not been executed by the
 author of this change; its behaviour must be qualified on Windows.
@@ -44,15 +50,61 @@ def _reject_traversal(path: Path) -> None:
         raise UntrustedLocationError(f"parent-traversal components are not supported: {path}")
 
 
-def publish(path: Path, session: dict, *, native=None) -> None:
+def publish(path: Path, session: dict, *, native=None):
+    """Publish ``session`` at ``path``; returns a receipt for ``remove_published``."""
     path = Path(path)
     _reject_traversal(path)
     data = encode_session(session)
-    path.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
-        publish_windows(path, data, native if native is not None else WindowsNative())
-    else:
-        publish_posix(path, data)
+        native = native if native is not None else WindowsNative()
+        _prepare_windows_parent(path, native)
+        return publish_windows(path, data, native)
+    _prepare_posix_parent(path)
+    return publish_posix(path, data)
+
+
+def _missing_parents(parent: Path) -> tuple[Path, list[Path]]:
+    """Nearest existing ancestor of ``parent`` (inclusive) and the folders to create, top-down."""
+    missing = []
+    existing = parent
+    while not os.path.lexists(existing):
+        missing.append(existing)
+        if existing.parent == existing:
+            raise UntrustedLocationError(f"no existing ancestor for: {parent}")
+        existing = existing.parent
+    return existing, list(reversed(missing))
+
+
+def _mkdir_each(missing: list[Path], mode: int) -> None:
+    for directory in missing:
+        try:
+            os.mkdir(directory, mode)
+        except FileExistsError:
+            pass  # created concurrently: the full checks during publication decide
+
+
+def remove_published(path: Path, receipt, *, native=None) -> str:
+    """Remove ``path`` only if it is still the file ``receipt`` names.
+
+    Returns "removed", "absent", or "kept-replaced" (a different object is at
+    the path and was left untouched). A missing receipt removes nothing.
+    """
+    path = Path(path)
+    if receipt is None:
+        return "kept-no-receipt"
+    if os.name == "nt":
+        native = native if native is not None else WindowsNative()
+        return native.remove_if_identity(str(path), receipt)
+    try:
+        present = os.lstat(path)
+    except FileNotFoundError:
+        return "absent"
+    if _posix_identity(present) != tuple(receipt):
+        return "kept-replaced"
+    # Residual (recorded): a small window between lstat and unlink; the parent
+    # passed the trust rule, so only the same user could act in it.
+    os.unlink(path)
+    return "removed"
 
 
 def _note_cleanup(error: BaseException, problem: str) -> None:
@@ -79,6 +131,32 @@ def _check_posix_ancestors(parent: Path, euid: int) -> None:
             raise UntrustedLocationError(f"ancestor owned by another user: {ancestor}")
         if st.st_mode & _POSIX_ANY_WRITE and not sticky_root:
             raise UntrustedLocationError(f"ancestor writable by other users: {ancestor}")
+
+
+def _posix_identity(st: os.stat_result) -> tuple:
+    # Inode numbers are reused as soon as a file is deleted; the change time taken
+    # after the bytes were written distinguishes a later file with the same inode.
+    return (st.st_dev, st.st_ino, st.st_ctime_ns)
+
+
+def identity_of(path: Path, *, native=None):
+    """Receipt-format identity of the object now at ``path`` (links are not followed)."""
+    if os.name == "nt":
+        native = native if native is not None else WindowsNative()
+        return native.identity_of_path(str(path))
+    return _posix_identity(os.lstat(path))
+
+
+def _prepare_posix_parent(path: Path) -> None:
+    parent = Path(os.path.abspath(path.parent))
+    existing, missing = _missing_parents(parent)
+    if not missing:
+        return
+    euid = os.geteuid()
+    # The nearest existing ancestor must satisfy the ancestor rule before anything
+    # is created beneath it; the full parent checks run again during publication.
+    _check_posix_ancestors(existing / "_", euid)
+    _mkdir_each(missing, 0o700)
 
 
 def _check_posix_parent(dir_fd: int, euid: int, parent: Path) -> None:
@@ -151,13 +229,22 @@ def publish_posix(path: Path, data: bytes) -> None:
         # exclusive creation raises here with nothing to clean up.
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                      0o600, dir_fd=dir_fd)
-        mine = os.fstat(fd)
+        try:
+            mine = os.fstat(fd)
+        except BaseException as error:
+            # Nothing has been written. Without the identity the file cannot be
+            # removed safely, so it is not removed: report it, close the descriptor.
+            pending = error
+            _note_cleanup(error, f"identity of the new file could not be read; an empty 0600 file {name} may remain")
+            _close_reporting(fd, name, pending)
+            raise
         try:
             _verify_posix_file(fd, euid)
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view):]
             os.fsync(fd)
+            final = os.fstat(fd)
         except BaseException as error:
             pending = error
             _posix_cleanup(dir_fd, name, fd, error)
@@ -168,7 +255,7 @@ def publish_posix(path: Path, data: bytes) -> None:
             # descriptor is not touched again). Removal is attempted, not promised.
             pending = SessionPublicationError(f"closing the session file failed after writing: {close_error!r}")
             pending.__cause__ = close_error
-            _posix_cleanup_by_identity(dir_fd, name, mine, pending)
+            _posix_cleanup_by_identity(dir_fd, name, final, pending)
     except BaseException as error:
         if pending is None:
             pending = error
@@ -179,6 +266,7 @@ def publish_posix(path: Path, data: bytes) -> None:
         _close_reporting(dir_fd, "the parent directory", pending)
     if pending is not None:
         raise pending
+    return _posix_identity(final)
 
 
 def _posix_cleanup_by_identity(dir_fd: int, name: str, mine: os.stat_result, error: BaseException) -> None:
@@ -187,7 +275,7 @@ def _posix_cleanup_by_identity(dir_fd: int, name: str, mine: os.stat_result, err
             present = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         except FileNotFoundError:
             return
-        if (present.st_dev, present.st_ino) != (mine.st_dev, mine.st_ino):
+        if _posix_identity(present) != _posix_identity(mine):
             _note_cleanup(error, f"cleanup skipped: {name} was replaced; the replacement was not removed")
             return
         os.unlink(name, dir_fd=dir_fd)
@@ -283,16 +371,48 @@ def check_windows_location(chain: list[dict], user_sid: str) -> None:
                     f"{sid} may modify {'the parent directory' if index == 0 else 'an ancestor'}: {where}")
 
 
-def publish_windows(path: Path, data: bytes, native) -> None:
-    _reject_traversal(path)
-    user_sid = native.token_user_sid()
+DRIVE_FIXED = 3
+
+
+def _windows_parent(path: Path):
     if os.name == "nt":
-        parent = Path(os.path.abspath(path.parent))
-    else:  # simulation with a fake native layer on a non-Windows host
-        parent = PureWindowsPath(str(path)).parent
+        return Path(os.path.abspath(path.parent))
+    return PureWindowsPath(str(path)).parent  # simulation with a fake native layer
+
+
+def _check_windows_drive(parent, native) -> None:
     drive = parent.drive
     if not (len(drive) == 2 and drive[1] == ":"):
         raise UntrustedLocationError(f"only local drive-letter paths are supported: {parent}")
+    info = native.drive_info(drive)
+    # A SUBST or mapped drive letter hides the real ancestors from the directory
+    # walk; only a fixed drive whose DOS device is a real device path is accepted.
+    if info.get("type") != DRIVE_FIXED:
+        raise UntrustedLocationError(f"drive {drive} is not a fixed local drive (type {info.get('type')})")
+    target = info.get("target") or ""
+    if not target.startswith("\\Device\\"):
+        raise UntrustedLocationError(f"drive {drive} is redirected (SUBST or mapping) to {target!r}")
+
+
+def _prepare_windows_parent(path: Path, native) -> None:
+    parent = _windows_parent(path)
+    _check_windows_drive(parent, native)
+    if os.name != "nt":
+        return  # simulation: nothing is created
+    existing, missing = _missing_parents(parent)
+    if not missing:
+        return
+    # The nearest existing ancestor must pass the directory rule (checked with the
+    # stricter parent rights) before any folder is created beneath it.
+    check_windows_location(native.directory_chain(existing), native.token_user_sid())
+    _mkdir_each(missing, 0o777)  # Windows: inherits the checked ancestor's ACL
+
+
+def publish_windows(path: Path, data: bytes, native):
+    _reject_traversal(path)
+    user_sid = native.token_user_sid()
+    parent = _windows_parent(path)
+    _check_windows_drive(parent, native)
     check_windows_location(native.directory_chain(parent), user_sid)
     # Create exactly inside the checked parent. Failed exclusive creation raises
     # here (FileExistsError) with no cleanup.
@@ -301,6 +421,7 @@ def publish_windows(path: Path, data: bytes, native) -> None:
         verify_windows_file_security(native.handle_security(handle), user_sid)
         native.write_all(handle, data)
         native.flush(handle)
+        receipt = native.file_identity(handle)
     except BaseException as error:
         # Delete exactly the object behind our handle; a replacement at the
         # same path is never touched. Deletion completes when the handle closes.
@@ -321,6 +442,7 @@ def publish_windows(path: Path, data: bytes, native) -> None:
         error = SessionPublicationError(
             f"closing the session file failed after writing; the file may remain: {close_error!r}")
         raise error from close_error
+    return receipt
 
 
 class WindowsNative:
@@ -347,6 +469,13 @@ class WindowsNative:
         class FILE_DISPOSITION_INFO(c.Structure):
             _fields_ = [("DeleteFile", w.BOOLEAN)]
 
+        class BY_HANDLE_FILE_INFORMATION(c.Structure):
+            _fields_ = [("dwFileAttributes", w.DWORD), ("ftCreationTime", w.FILETIME), ("ftLastAccessTime", w.FILETIME),
+                        ("ftLastWriteTime", w.FILETIME), ("dwVolumeSerialNumber", w.DWORD), ("nFileSizeHigh", w.DWORD),
+                        ("nFileSizeLow", w.DWORD), ("nNumberOfLinks", w.DWORD), ("nFileIndexHigh", w.DWORD),
+                        ("nFileIndexLow", w.DWORD)]
+        self.BHFI = BY_HANDLE_FILE_INFORMATION
+
         self.SA, self.ASI, self.AH, self.FDI = SECURITY_ATTRIBUTES, ACL_SIZE_INFORMATION, ACE_HEADER, FILE_DISPOSITION_INFO
         k, a = self.k, self.a
         k.GetCurrentProcess.restype = w.HANDLE
@@ -359,6 +488,9 @@ class WindowsNative:
         k.SetFileInformationByHandle.restype = w.BOOL
         k.LocalFree.argtypes = [c.c_void_p]; k.LocalFree.restype = c.c_void_p
         k.GetFileAttributesW.argtypes = [w.LPCWSTR]; k.GetFileAttributesW.restype = w.DWORD
+        k.GetFileInformationByHandle.argtypes = [w.HANDLE, c.c_void_p]; k.GetFileInformationByHandle.restype = w.BOOL
+        k.GetDriveTypeW.argtypes = [w.LPCWSTR]; k.GetDriveTypeW.restype = w.UINT
+        k.QueryDosDeviceW.argtypes = [w.LPCWSTR, w.LPWSTR, w.DWORD]; k.QueryDosDeviceW.restype = w.DWORD
         a.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)]; a.OpenProcessToken.restype = w.BOOL
         a.GetTokenInformation.argtypes = [w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.POINTER(w.DWORD)]
         a.GetTokenInformation.restype = w.BOOL
@@ -409,7 +541,8 @@ class WindowsNative:
         self._ok(self.a.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, c.byref(psd), None))
         try:
             sa = self.SA(c.sizeof(self.SA), psd, False)  # handle not inheritable
-            handle = self.k.CreateFileW(path, GENERIC_WRITE | 0x00020000 | DELETE,  # + READ_CONTROL, DELETE
+            # + READ_CONTROL, DELETE, FILE_READ_ATTRIBUTES (needed by GetFileInformationByHandle for the receipt)
+            handle = self.k.CreateFileW(path, GENERIC_WRITE | 0x00020000 | DELETE | 0x0080,
                                         0, c.byref(sa), 1, 0x80, None)  # no sharing, CREATE_NEW, NORMAL
             if handle is None or handle == w.HANDLE(-1).value:
                 error = c.get_last_error()
@@ -492,3 +625,44 @@ class WindowsNative:
 
     def close(self, handle) -> None:
         self._ok(self.k.CloseHandle(handle))
+
+    def file_identity(self, handle):
+        info = self.BHFI()
+        self._ok(self.k.GetFileInformationByHandle(handle, self.c.byref(info)))
+        return (info.dwVolumeSerialNumber, (info.nFileIndexHigh << 32) | info.nFileIndexLow)
+
+    def drive_info(self, drive: str) -> dict:
+        c = self.c
+        buffer = c.create_unicode_buffer(1024)
+        length = self.k.QueryDosDeviceW(drive, buffer, 1024)
+        if not length:
+            raise c.WinError(c.get_last_error())
+        return {"type": self.k.GetDriveTypeW(drive + "\\"), "target": buffer.value}
+
+    def identity_of_path(self, path: str):
+        c, w = self.c, self.w
+        handle = self.k.CreateFileW(path, 0x0080, 0x7, None, 3, 0x00200000, None)  # FILE_READ_ATTRIBUTES, open the link itself
+        if handle is None or handle == w.HANDLE(-1).value:
+            raise c.WinError(c.get_last_error())
+        try:
+            return self.file_identity(handle)
+        finally:
+            self.k.CloseHandle(handle)
+
+    def remove_if_identity(self, path: str, receipt) -> str:
+        c, w = self.c, self.w
+        # DELETE | FILE_READ_ATTRIBUTES; share read/write/delete; OPEN_EXISTING;
+        # FILE_FLAG_OPEN_REPARSE_POINT so a link at the path is opened, not followed.
+        handle = self.k.CreateFileW(path, DELETE | 0x0080, 0x7, None, 3, 0x00200000, None)
+        if handle is None or handle == w.HANDLE(-1).value:
+            error = c.get_last_error()
+            if error in (2, 3):  # ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND
+                return "absent"
+            raise c.WinError(error)
+        try:
+            if self.file_identity(handle) != tuple(receipt):
+                return "kept-replaced"
+            self.delete_by_handle(handle)  # exactly the object behind this handle
+            return "removed"
+        finally:
+            self.k.CloseHandle(handle)

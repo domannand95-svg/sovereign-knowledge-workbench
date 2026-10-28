@@ -220,8 +220,11 @@ class FakeNative:
         self.create_error, self.delete_error = create_error, delete_error
         self.sddl = None
 
+    drive = {"type": 3, "target": "\\Device\\HarddiskVolume3"}
     def token_user_sid(self): self.events.append("sid"); return USER
+    def drive_info(self, drive): self.events.append("drive"); return self.drive
     def directory_chain(self, parent): self.events.append("chain"); return self.chain
+    def file_identity(self, handle): self.events.append("identity"); return (1, handle)
     def create_new(self, path, sddl):
         self.events.append("create"); self.sddl = sddl
         if self.create_error: raise self.create_error
@@ -238,8 +241,9 @@ class FakeNative:
 def test_windows_simulated_order_restricts_and_verifies_before_any_write(monkeypatch):
     monkeypatch.setenv("USERNAME", "not-used"); monkeypatch.setenv("USERDOMAIN", "not-used")
     native = FakeNative()
-    sp.publish_windows(Path("C:/x/session.json"), sp.encode_session(SESSION), native)
-    assert native.events == ["sid", "chain", "create", "verify", "write", "flush", "close"]
+    receipt = sp.publish_windows(Path("C:/x/session.json"), sp.encode_session(SESSION), native)
+    assert native.events == ["sid", "drive", "chain", "create", "verify", "write", "flush", "identity", "close"]
+    assert receipt == (1, 7)
     assert native.sddl == f"O:{USER}D:P(A;;FRFW;;;{USER})"
     assert native.written == json.dumps(SESSION, sort_keys=True).encode("utf-8")
 
@@ -273,7 +277,7 @@ def test_windows_simulated_creation_failure_touches_nothing(error):
     native = FakeNative(create_error=error)
     with pytest.raises(type(error)):
         sp.publish_windows(Path("C:/x/session.json"), b"token-bytes", native)
-    assert native.events == ["sid", "chain", "create"]
+    assert native.events == ["sid", "drive", "chain", "create"]
 
 
 def test_windows_simulated_cleanup_failure_is_reported():
@@ -510,7 +514,7 @@ def test_windows_simulated_close_failure_after_write_is_reported_without_retry()
     native = CloseFails()
     with pytest.raises(sp.SessionPublicationError, match="may remain"):
         sp.publish_windows(Path("C:/x/session.json"), b"token-bytes", native)
-    assert native.events == ["sid", "chain", "create", "verify", "write", "flush", "close"]
+    assert native.events == ["sid", "drive", "chain", "create", "verify", "write", "flush", "identity", "close"]
 
 
 def test_windows_simulated_close_failure_on_error_path_keeps_original_error():
@@ -589,3 +593,114 @@ def test_windows_native_junction_in_path_is_refused(trusted_windows_dir):
     with pytest.raises(sp.UntrustedLocationError, match="reparse"):
         sp.publish(junction / "session.json", SESSION)
     assert not (real / "session.json").exists()
+
+
+# ------------------------------------------------ fix batch (29 Oct 2026, owner-approved 09:15)
+
+@pytest.mark.parametrize("drive", [
+    {"type": 3, "target": "\\??\\C:\\Users\\u\\elsewhere"},           # SUBST mapping
+    {"type": 4, "target": "\\Device\\LanmanRedirector\\;Z:\\server"},  # mapped network drive
+    {"type": 2, "target": "\\Device\\HarddiskVolume9"},               # removable
+    {"type": 3, "target": ""},                                         # unknown target
+])
+def test_windows_simulated_redirected_or_non_fixed_drive_refused_before_any_check_or_creation(drive):
+    native = FakeNative()
+    native.drive = drive
+    with pytest.raises(sp.UntrustedLocationError, match="drive"):
+        sp.publish_windows(Path("C:/x/session.json"), b"token-bytes", native)
+    assert "chain" not in native.events and "create" not in native.events and native.written == b""
+
+
+@posix_only
+def test_missing_parent_folders_are_created_0700_after_the_existing_ancestor_passed(tmp_path):
+    base = private_dir(tmp_path / "pub")
+    target = base / "a" / "b" / "session.json"
+    receipt = sp.publish(target, SESSION)
+    assert target.read_bytes() == json.dumps(SESSION, sort_keys=True).encode("utf-8")
+    for folder in (base / "a", base / "a" / "b"):
+        assert stat.S_IMODE(os.lstat(folder).st_mode) == 0o700
+    assert receipt == sp.identity_of(target)
+
+
+@posix_only
+def test_untrusted_existing_ancestor_refuses_before_any_folder_is_created(tmp_path):
+    open_dir = tmp_path / "open"
+    open_dir.mkdir()
+    open_dir.chmod(0o777)
+    target = open_dir / "a" / "b" / "session.json"
+    with pytest.raises(sp.UntrustedLocationError):
+        sp.publish(target, SESSION)
+    assert not (open_dir / "a").exists()
+
+
+@posix_only
+def test_first_fstat_failure_closes_the_descriptor_and_reports_the_empty_file(tmp_path, monkeypatch):
+    target = private_dir(tmp_path / "pub") / "session.json"
+    real_fstat, real_close, calls, closed = os.fstat, os.close, [], []
+    def fstat(fd):
+        calls.append(fd)
+        if len(calls) == 2:  # 1st: the parent directory check; 2nd: the new file's identity
+            raise OSError(5, "synthetic fstat failure")
+        return real_fstat(fd)
+    def close(fd):
+        closed.append(fd); return real_close(fd)
+    monkeypatch.setattr(sp.os, "fstat", fstat)
+    monkeypatch.setattr(sp.os, "close", close)
+    with pytest.raises(OSError, match="synthetic fstat failure") as caught:
+        sp.publish(target, SESSION)
+    monkeypatch.undo()
+    assert any("may remain" in note for note in getattr(caught.value, "__notes__", []))
+    assert closed.count(calls[1]) == 1            # the new file's descriptor was closed exactly once
+    assert target.exists() and target.stat().st_size == 0 and stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+@posix_only
+def test_remove_published_removes_only_the_file_it_names(tmp_path):
+    base = private_dir(tmp_path / "pub")
+    target = base / "session.json"
+    receipt = sp.publish(target, SESSION)
+    assert sp.remove_published(target, receipt) == "removed" and not target.exists()
+    assert sp.remove_published(target, receipt) == "absent"
+    second = sp.publish(target, SESSION)
+    target.unlink()
+    target.write_bytes(b"replacement")              # a different file now sits at the path
+    assert sp.remove_published(target, second) == "kept-replaced"
+    assert target.read_bytes() == b"replacement"
+    assert sp.remove_published(target, None) == "kept-no-receipt" and target.exists()
+
+
+@posix_only
+def test_remove_published_does_not_follow_a_link_at_the_path(tmp_path):
+    base = private_dir(tmp_path / "pub")
+    target = base / "session.json"
+    receipt = sp.publish(target, SESSION)
+    target.rename(base / "moved.json")
+    target.symlink_to(base / "moved.json")         # a link to the original file
+    assert sp.remove_published(target, receipt) == "kept-replaced"
+    assert (base / "moved.json").exists() and target.is_symlink()
+
+
+@windows_only
+def test_windows_native_fixed_system_drive_is_a_real_device():
+    info = sp.WindowsNative().drive_info(os.environ["SystemDrive"])
+    assert info["type"] == sp.DRIVE_FIXED and info["target"].startswith("\\Device\\")
+
+
+@windows_only
+def test_windows_native_missing_parents_created_inside_a_trusted_location(trusted_windows_dir):
+    target = trusted_windows_dir / "a" / "b" / "session.json"
+    receipt = sp.publish(target, SESSION)
+    assert target.read_bytes() == json.dumps(SESSION, sort_keys=True).encode("utf-8") and receipt
+
+
+@windows_only
+def test_windows_native_remove_published_removes_own_file_and_keeps_a_replacement(trusted_windows_dir):
+    target = trusted_windows_dir / "session.json"
+    receipt = sp.publish(target, SESSION)
+    assert sp.remove_published(target, receipt) == "removed" and not target.exists()
+    assert sp.remove_published(target, receipt) == "absent"
+    second = sp.publish(target, SESSION)
+    os.remove(target)
+    target.write_bytes(b"replacement")
+    assert sp.remove_published(target, second) == "kept-replaced"
+    assert target.read_bytes() == b"replacement"
