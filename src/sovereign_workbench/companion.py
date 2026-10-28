@@ -5,7 +5,6 @@ import hmac
 import json
 import os
 import secrets
-import subprocess
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -18,6 +17,7 @@ from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from .adapters import AdapterError, request_sovereign_authorization
+from .session_publication import publish as publish_session_file
 from .jobs import connect as connect_jobs
 from .reviews import list_candidates, verify_decisions
 from .staging import (StagingError, build_plan, connect as connect_staging,
@@ -326,23 +326,10 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _write_session_file(path: Path, session: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(session, sort_keys=True), encoding="utf-8")
-    path.chmod(0o600)
-    if os.name == "nt":
-        username = os.environ.get("USERNAME")
-        domain = os.environ.get("USERDOMAIN")
-        principal = f"{domain}\\{username}" if domain and username else username
-        if not principal:
-            path.unlink(missing_ok=True)
-            raise RuntimeError("Cannot determine the Windows user for companion session ACL")
-        completed = subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:(R,W)"],
-            capture_output=True, check=False, timeout=10,
-        )
-        if completed.returncode != 0:
-            path.unlink(missing_ok=True)
-            raise RuntimeError("Could not restrict the companion session file ACL")
+    # Restrict before any token byte is written, verify through the created
+    # descriptor/handle, refuse untrusted parents, and clean up only what this
+    # call created. See session_publication for the platform mechanisms.
+    publish_session_file(path, session)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -358,17 +345,21 @@ def main(argv: list[str] | None = None) -> int:
     session = {"url": f"http://127.0.0.1:{args.port}", "token": token,
                "contract_version": CONTRACT_VERSION, "authority": "none",
                "pid": os.getpid(), "token_ttl_seconds": config.token_ttl_seconds}
-    if args.session_file:
-        _write_session_file(args.session_file, session)
-    print(json.dumps(session), flush=True)
+    session_written = False
     try:
+        if args.session_file:
+            _write_session_file(args.session_file, session)
+            session_written = True
+        print(json.dumps(session), flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
         return 0
     finally:
-        server.server_close()
-        if args.session_file:
-            args.session_file.unlink(missing_ok=True)
+        try:
+            server.server_close()
+        finally:
+            if session_written:
+                args.session_file.unlink(missing_ok=True)
     return 0
 
 
