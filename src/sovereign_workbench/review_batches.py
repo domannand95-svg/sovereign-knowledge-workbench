@@ -136,6 +136,202 @@ CREATE TABLE IF NOT EXISTS archive_dataset_allocations (
   allocation_sha256 TEXT NOT NULL UNIQUE,
   assigned_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS archive_document_families (
+  family_id TEXT PRIMARY KEY,
+  family_key TEXT NOT NULL UNIQUE,
+  proposed_topic TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  family_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_document_family_members (
+  family_id TEXT NOT NULL REFERENCES archive_document_families(family_id),
+  source_id TEXT NOT NULL UNIQUE REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  membership_reason TEXT NOT NULL,
+  PRIMARY KEY(family_id,source_id)
+);
+CREATE TABLE IF NOT EXISTS archive_family_claims (
+  claim_id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL REFERENCES archive_document_families(family_id),
+  normalized_claim TEXT NOT NULL,
+  claim_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE')
+);
+CREATE TABLE IF NOT EXISTS archive_family_claim_coverage (
+  claim_id TEXT NOT NULL REFERENCES archive_family_claims(claim_id),
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  stance TEXT NOT NULL CHECK(stance IN ('ASSERTS','CONTRADICTS')),
+  section_label TEXT NOT NULL,
+  excerpt TEXT NOT NULL,
+  PRIMARY KEY(claim_id,source_id,stance)
+);
+CREATE TABLE IF NOT EXISTS archive_family_relationship_proposals (
+  proposal_id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL REFERENCES archive_document_families(family_id),
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  related_source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  relationship_type TEXT NOT NULL CHECK(relationship_type IN (
+    'EXACT_DUPLICATE_OF','POSSIBLE_REVISION_OF','PARTIALLY_SUPERSEDES',
+    'SUPPORTING_APPENDIX_TO','DIVERGENT_BRANCH_OF','CONTRADICTS','CANONICAL_CANDIDATE_FOR'
+  )),
+  reason TEXT NOT NULL,
+  proposal_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_family_boundary_decisions (
+  decision_id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  subject_sha256 TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK(decision IN ('APPROVE','REJECT','NEEDS_RESEARCH')),
+  reviewer TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  decision_sha256 TEXT NOT NULL UNIQUE,
+  decided_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_family_research_tickets (
+  ticket_id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL REFERENCES archive_document_families(family_id),
+  claim_id TEXT REFERENCES archive_family_claims(claim_id),
+  question TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  ticket_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_family_evidence_returns (
+  return_id TEXT PRIMARY KEY,
+  ticket_id TEXT NOT NULL REFERENCES archive_family_research_tickets(ticket_id),
+  ticket_sha256 TEXT NOT NULL,
+  findings_json TEXT NOT NULL,
+  citations_json TEXT NOT NULL,
+  uncertainties_json TEXT NOT NULL,
+  return_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  imported_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_family_synthesis_proposals (
+  synthesis_id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL REFERENCES archive_document_families(family_id),
+  proposed_topic TEXT NOT NULL,
+  proposed_maturity TEXT NOT NULL,
+  proposed_authority TEXT NOT NULL,
+  canonical_source_id TEXT REFERENCES review_sources(source_id),
+  synthesis_json TEXT NOT NULL,
+  synthesis_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_document_sections (
+  section_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  heading TEXT NOT NULL,
+  bounded_excerpt TEXT NOT NULL,
+  content_sha256 TEXT NOT NULL,
+  section_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  created_at TEXT NOT NULL,
+  UNIQUE(source_id,ordinal)
+);
+CREATE TABLE IF NOT EXISTS archive_section_family_proposals (
+  proposal_id TEXT PRIMARY KEY,
+  section_id TEXT NOT NULL REFERENCES archive_document_sections(section_id),
+  proposed_family_key TEXT NOT NULL,
+  proposed_topic TEXT NOT NULL,
+  confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+  reason TEXT NOT NULL,
+  proposal_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  created_at TEXT NOT NULL,
+  UNIQUE(section_id,proposed_family_key)
+);
+CREATE TABLE IF NOT EXISTS archive_section_boundary_decisions (
+  decision_id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL REFERENCES archive_section_family_proposals(proposal_id),
+  proposal_sha256 TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK(decision IN ('APPROVE','REJECT','NEEDS_RESEARCH')),
+  reviewer TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  decision_sha256 TEXT NOT NULL UNIQUE,
+  decided_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_document_map_decisions (
+  decision_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  map_sha256 TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK(decision IN ('MAP_ACCEPTED','NEEDS_RESEARCH','RECLASSIFY')),
+  reviewer TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  decision_sha256 TEXT NOT NULL UNIQUE,
+  decided_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS archive_section_exclusions (
+  exclusion_id TEXT PRIMARY KEY,
+  section_id TEXT NOT NULL REFERENCES archive_document_sections(section_id),
+  source_sha256 TEXT NOT NULL,
+  marker_code TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  exclusion_scope TEXT NOT NULL CHECK(exclusion_scope='RESEARCH_SYNTHESIS_PUBLICATION_TRAINING'),
+  reviewer TEXT NOT NULL,
+  exclusion_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  excluded_at TEXT NOT NULL,
+  UNIQUE(section_id,marker_code)
+);
+CREATE TABLE IF NOT EXISTS archive_section_directives (
+  directive_id TEXT PRIMARY KEY,
+  section_id TEXT NOT NULL REFERENCES archive_document_sections(section_id),
+  source_sha256 TEXT NOT NULL,
+  concept_code TEXT NOT NULL,
+  disposition TEXT NOT NULL CHECK(disposition IN (
+    'SPECULATIVE_HOLD','CLOSED_LAB_RESEARCH','ASSESS_CONTAMINATION',
+    'SUPERSEDED_NONVIABLE','RESEARCH_REQUIRED','FUTURE_FUNDING_RESEARCH'
+  )),
+  reason TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  directive_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  directed_at TEXT NOT NULL,
+  UNIQUE(section_id,concept_code)
+);
+CREATE TABLE IF NOT EXISTS archive_repository_artifact_routes (
+  route_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  repository_name TEXT NOT NULL,
+  canonical_path TEXT NOT NULL,
+  canonical_sha256 TEXT NOT NULL,
+  relationship TEXT NOT NULL CHECK(relationship IN (
+    'SUPERSEDED_REPOSITORY_COPY','REPOSITORY_PROVENANCE_COPY','CANONICAL_MATCH'
+  )),
+  reason TEXT NOT NULL,
+  dataset_disposition TEXT NOT NULL CHECK(dataset_disposition='EXCLUDED'),
+  movement_authority TEXT NOT NULL CHECK(movement_authority='NOT_AUTHORIZED'),
+  reviewer TEXT NOT NULL,
+  route_sha256 TEXT NOT NULL UNIQUE,
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  routed_at TEXT NOT NULL,
+  UNIQUE(source_id,canonical_path,relationship)
+);
+CREATE TABLE IF NOT EXISTS archive_section_research_tickets (
+  ticket_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES review_sources(source_id),
+  source_sha256 TEXT NOT NULL,
+  proposed_topic TEXT NOT NULL,
+  section_ids_json TEXT NOT NULL,
+  section_hashes_json TEXT NOT NULL,
+  question TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  ticket_sha256 TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK(status='DRAFT'),
+  authority TEXT NOT NULL CHECK(authority='NONE'),
+  created_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS review_batches_no_update
   BEFORE UPDATE ON review_batches BEGIN SELECT RAISE(ABORT, 'review batches are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS review_batches_no_delete
@@ -172,6 +368,40 @@ CREATE TRIGGER IF NOT EXISTS archive_dataset_allocations_no_update
   BEFORE UPDATE ON archive_dataset_allocations BEGIN SELECT RAISE(ABORT, 'dataset allocations are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_dataset_allocations_no_delete
   BEFORE DELETE ON archive_dataset_allocations BEGIN SELECT RAISE(ABORT, 'dataset allocations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_document_families_no_update BEFORE UPDATE ON archive_document_families BEGIN SELECT RAISE(ABORT, 'document families are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_document_families_no_delete BEFORE DELETE ON archive_document_families BEGIN SELECT RAISE(ABORT, 'document families are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_relationship_proposals_no_update BEFORE UPDATE ON archive_family_relationship_proposals BEGIN SELECT RAISE(ABORT, 'family relationship proposals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_relationship_proposals_no_delete BEFORE DELETE ON archive_family_relationship_proposals BEGIN SELECT RAISE(ABORT, 'family relationship proposals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_boundary_decisions_no_update BEFORE UPDATE ON archive_family_boundary_decisions BEGIN SELECT RAISE(ABORT, 'family boundary decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_boundary_decisions_no_delete BEFORE DELETE ON archive_family_boundary_decisions BEGIN SELECT RAISE(ABORT, 'family boundary decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_evidence_returns_no_update BEFORE UPDATE ON archive_family_evidence_returns BEGIN SELECT RAISE(ABORT, 'family evidence returns are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_evidence_returns_no_delete BEFORE DELETE ON archive_family_evidence_returns BEGIN SELECT RAISE(ABORT, 'family evidence returns are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_document_family_members_no_update BEFORE UPDATE ON archive_document_family_members BEGIN SELECT RAISE(ABORT, 'family members are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_document_family_members_no_delete BEFORE DELETE ON archive_document_family_members BEGIN SELECT RAISE(ABORT, 'family members are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_claims_no_update BEFORE UPDATE ON archive_family_claims BEGIN SELECT RAISE(ABORT, 'family claims are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_claims_no_delete BEFORE DELETE ON archive_family_claims BEGIN SELECT RAISE(ABORT, 'family claims are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_claim_coverage_no_update BEFORE UPDATE ON archive_family_claim_coverage BEGIN SELECT RAISE(ABORT, 'family claim coverage is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_claim_coverage_no_delete BEFORE DELETE ON archive_family_claim_coverage BEGIN SELECT RAISE(ABORT, 'family claim coverage is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_research_tickets_no_update BEFORE UPDATE ON archive_family_research_tickets BEGIN SELECT RAISE(ABORT, 'family research tickets are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_research_tickets_no_delete BEFORE DELETE ON archive_family_research_tickets BEGIN SELECT RAISE(ABORT, 'family research tickets are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_synthesis_proposals_no_update BEFORE UPDATE ON archive_family_synthesis_proposals BEGIN SELECT RAISE(ABORT, 'family synthesis proposals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_family_synthesis_proposals_no_delete BEFORE DELETE ON archive_family_synthesis_proposals BEGIN SELECT RAISE(ABORT, 'family synthesis proposals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_document_sections_no_update BEFORE UPDATE ON archive_document_sections BEGIN SELECT RAISE(ABORT, 'document sections are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_document_sections_no_delete BEFORE DELETE ON archive_document_sections BEGIN SELECT RAISE(ABORT, 'document sections are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_family_proposals_no_update BEFORE UPDATE ON archive_section_family_proposals BEGIN SELECT RAISE(ABORT, 'section family proposals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_family_proposals_no_delete BEFORE DELETE ON archive_section_family_proposals BEGIN SELECT RAISE(ABORT, 'section family proposals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_boundary_decisions_no_update BEFORE UPDATE ON archive_section_boundary_decisions BEGIN SELECT RAISE(ABORT, 'section boundary decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_boundary_decisions_no_delete BEFORE DELETE ON archive_section_boundary_decisions BEGIN SELECT RAISE(ABORT, 'section boundary decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_document_map_decisions_no_update BEFORE UPDATE ON archive_document_map_decisions BEGIN SELECT RAISE(ABORT, 'document map decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_document_map_decisions_no_delete BEFORE DELETE ON archive_document_map_decisions BEGIN SELECT RAISE(ABORT, 'document map decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_exclusions_no_update BEFORE UPDATE ON archive_section_exclusions BEGIN SELECT RAISE(ABORT, 'section exclusions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_exclusions_no_delete BEFORE DELETE ON archive_section_exclusions BEGIN SELECT RAISE(ABORT, 'section exclusions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_directives_no_update BEFORE UPDATE ON archive_section_directives BEGIN SELECT RAISE(ABORT, 'section directives are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_directives_no_delete BEFORE DELETE ON archive_section_directives BEGIN SELECT RAISE(ABORT, 'section directives are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_repository_artifact_routes_no_update BEFORE UPDATE ON archive_repository_artifact_routes BEGIN SELECT RAISE(ABORT, 'repository artifact routes are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_repository_artifact_routes_no_delete BEFORE DELETE ON archive_repository_artifact_routes BEGIN SELECT RAISE(ABORT, 'repository artifact routes are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_research_tickets_no_update BEFORE UPDATE ON archive_section_research_tickets BEGIN SELECT RAISE(ABORT, 'section research tickets are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_section_research_tickets_no_delete BEFORE DELETE ON archive_section_research_tickets BEGIN SELECT RAISE(ABORT, 'section research tickets are immutable'); END;
 """
 
 TOPICS = {"Governance", "Metabolism", "Energy", "Compute", "Perception", "Other", "Needs review"}
@@ -863,10 +1093,8 @@ def import_dataset_allocations(database: sqlite3.Connection, input_path: Path) -
             if not latest:
                 raise ValueError("Dataset allocation requires a human review decision")
             if value["allocation"] in {"TRAIN_ELIGIBLE", "HELD_OUT_LOCKED"}:
-                if latest[0] != "APPROVE" or latest[1] != "Reviewed":
-                    raise ValueError("Training and held-out allocations require an approved privacy-reviewed source")
-                if latest[2] in {"DUPLICATE", "SUPERSEDED", "UNRESOLVED"}:
-                    raise ValueError("Training and held-out allocations require resolved canonical status")
+                if latest[1] != "Reviewed":
+                    raise ValueError("Training and held-out allocations require a privacy-reviewed source")
             family_splits = database.execute(
                 "SELECT DISTINCT allocation FROM archive_dataset_allocations WHERE source_family_id=? "
                 "AND allocation IN ('TRAIN_ELIGIBLE','HELD_OUT_LOCKED')",
@@ -938,7 +1166,7 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
         "ORDER BY d.source_id"
     ).fetchall()
     if len(rows) < 400:
-        raise ValueError("At least 400 approved allocated examples are required for dataset export")
+        raise ValueError("At least 400 human-reviewed allocated examples are required for dataset export")
     train_rows, eval_rows = [], []
     family_splits: dict[str, str] = {}
     category_counts = {category: 0 for category in BEHAVIOR_CATEGORIES}
@@ -947,8 +1175,7 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
         (decision_id, source_id, decision, topic, maturity, authority, confidence, privacy,
          canonical, note, question, summary, proposed_topic, proposed_maturity,
          proposed_authority, reason, allocation, family_id, category) = row
-        if decision != "APPROVE" or privacy != "Reviewed" or canonical in {
-                "DUPLICATE", "SUPERSEDED", "UNRESOLVED"}:
+        if decision not in DECISIONS or privacy != "Reviewed":
             raise ValueError("Dataset export encountered an ineligible review decision")
         previous = family_splits.setdefault(family_id, allocation)
         if previous != allocation:

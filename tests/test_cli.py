@@ -5,7 +5,8 @@ import json
 import sqlite3
 from unittest.mock import patch
 
-from sovereign_workbench.cli import main
+from sovereign_workbench.cli import _deduplicate_records, main
+from sovereign_workbench.model import FileRecord
 from sovereign_workbench.model import Classification
 
 
@@ -121,3 +122,10 @@ def test_archive_local_model_candidate_binds_runtime_provenance(tmp_path: Path, 
         ).fetchone()[0]
     assert "model=test-model" in reason
     assert "max_content_chars=4321" in reason
+
+
+def test_hash_deduplication_excludes_admitted_and_repeated_content():
+    records = [FileRecord(f"{index}.txt", digest, 1, "text/plain", index)
+               for index, digest in enumerate(("a" * 64, "b" * 64, "b" * 64, "c" * 64))]
+    selected = _deduplicate_records(records, {"a" * 64}, 2)
+    assert [record.sha256 for record in selected] == ["b" * 64, "c" * 64]

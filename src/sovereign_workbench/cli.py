@@ -30,6 +30,19 @@ from .epistemic import assess
 from .taxonomy import load_taxonomy
 from .local_model import LocalModelConfig, classify_with_local_model
 from .relationships import detect_relationships
+from .family_review import (build_family_proposals, decide_boundary, family_report,
+                            generate_research_tickets, import_evidence_return,
+                            propose_synthesis)
+from .family_audit import export_family_audit
+from .section_dataset import (export_section_dataset_audit, export_section_dataset_summary,
+                              materialize_approved_section_split)
+from .section_review import (build_section_proposals, decide_section_boundary,
+                             document_exception_maps, exception_queue, section_review_queue)
+from .corpus_hardening import (apply_contamination_exclusions,
+                               export_topic_research_tickets,
+                               generate_topic_research_tickets)
+from .concept_directives import apply_concept_directives
+from .repository_artifacts import route_repository_artifact
 
 
 def _select_manifest_records(root: Path, records: list, manifest_path: Path) -> list:
@@ -56,6 +69,19 @@ def _select_manifest_records(root: Path, records: list, manifest_path: Path) -> 
         if record is None or record.sha256 != item["sha256"]:
             raise ValueError("Archive selection identity mismatch")
         selected.append(record)
+    return selected
+
+
+def _deduplicate_records(records: list, admitted_hashes: set[str], limit: int) -> list:
+    selected = []
+    selected_hashes: set[str] = set()
+    for record in records:
+        if record.sha256 in admitted_hashes or record.sha256 in selected_hashes:
+            continue
+        selected.append(record)
+        selected_hashes.add(record.sha256)
+        if len(selected) >= limit:
+            break
     return selected
 
 
@@ -153,6 +179,8 @@ def parser() -> argparse.ArgumentParser:
     batch_create.add_argument("--local-model", action="store_true")
     batch_create.add_argument("--selection-manifest", type=Path,
                               help="Admit only exact path-and-hash-bound items from a selection manifest")
+    batch_create.add_argument("--deduplicate-hash", action="store_true",
+                              help="Select only the next path-stable files with hashes not already admitted")
     batch_export = commands.add_parser("archive-batch-export", help="Export a non-overwriting review CSV")
     batch_export.add_argument("batch_id"); batch_export.add_argument("--state-db", required=True, type=Path)
     batch_export.add_argument("--output", required=True, type=Path)
@@ -174,6 +202,69 @@ def parser() -> argparse.ArgumentParser:
     dataset_allocate = commands.add_parser("archive-dataset-allocate", help="Import immutable human dataset allocations")
     dataset_allocate.add_argument("input", type=Path)
     dataset_allocate.add_argument("--state-db", required=True, type=Path)
+    family_build = commands.add_parser("archive-family-build", help="Build inert candidate document families and claim matrices")
+    family_build.add_argument("--state-db", required=True, type=Path)
+    family_show = commands.add_parser("archive-family-show", help="Show one candidate family review report")
+    family_show.add_argument("family_id"); family_show.add_argument("--state-db", required=True, type=Path)
+    family_decide = commands.add_parser("archive-family-decide", help="Append a hash-bound human family or relationship decision")
+    family_decide.add_argument("subject_id"); family_decide.add_argument("subject_sha256")
+    family_decide.add_argument("decision", choices=["APPROVE", "REJECT", "NEEDS_RESEARCH"])
+    family_decide.add_argument("--reviewer", required=True); family_decide.add_argument("--reason", required=True)
+    family_decide.add_argument("--state-db", required=True, type=Path)
+    family_research = commands.add_parser("archive-family-research", help="Generate bounded claim-level research tickets")
+    family_research.add_argument("family_id"); family_research.add_argument("--state-db", required=True, type=Path)
+    family_return = commands.add_parser("archive-family-evidence-import", help="Import one hash-bound family evidence return")
+    family_return.add_argument("input", type=Path); family_return.add_argument("--state-db", required=True, type=Path)
+    family_synthesis = commands.add_parser("archive-family-synthesis", help="Propose an inert canonical family synthesis after approval")
+    family_synthesis.add_argument("family_id"); family_synthesis.add_argument("--state-db", required=True, type=Path)
+    family_audit = commands.add_parser("archive-family-audit", help="Export a read-only revision-safe lineage and dataset-readiness audit")
+    family_audit.add_argument("--state-db", required=True, type=Path)
+    family_audit.add_argument("--output", required=True, type=Path)
+    section_dataset = commands.add_parser("archive-section-dataset-audit", help="Export inert section candidates and a family-safe split proposal")
+    section_dataset.add_argument("--state-db", required=True, type=Path)
+    section_dataset.add_argument("--output", required=True, type=Path)
+    section_summary_page = commands.add_parser("archive-section-dataset-summary", help="Create a compact non-authoritative dataset review page")
+    section_summary_page.add_argument("audit", type=Path)
+    section_summary_page.add_argument("--output", required=True, type=Path)
+    section_materialize = commands.add_parser("archive-section-dataset-materialize", help="Materialize one explicitly approved hash-bound 300/100 split")
+    section_materialize.add_argument("audit", type=Path)
+    section_materialize.add_argument("--audit-sha256", required=True)
+    section_materialize.add_argument("--reviewer", required=True)
+    section_materialize.add_argument("--output-dir", required=True, type=Path)
+    section_build = commands.add_parser("archive-section-build", help="Build inert section-level cross-family proposals")
+    section_build.add_argument("--state-db", required=True, type=Path)
+    section_list = commands.add_parser("archive-section-list", help="List unresolved section-family proposals")
+    section_list.add_argument("--state-db", required=True, type=Path)
+    section_decide = commands.add_parser("archive-section-decide", help="Append a hash-bound human section-family decision")
+    section_decide.add_argument("proposal_id"); section_decide.add_argument("proposal_sha256")
+    section_decide.add_argument("decision", choices=["APPROVE", "REJECT", "NEEDS_RESEARCH"])
+    section_decide.add_argument("--reviewer", required=True); section_decide.add_argument("--reason", required=True)
+    section_decide.add_argument("--state-db", required=True, type=Path)
+    section_summary = commands.add_parser("archive-section-summary", help="Show compact document maps and exception-only queue")
+    section_summary.add_argument("--state-db", required=True, type=Path)
+    section_summary.add_argument("--all", action="store_true", help="Include documents with no material exception")
+    corpus_exclude = commands.add_parser("archive-corpus-exclude", help="Append explicit section contamination exclusions")
+    corpus_exclude.add_argument("--state-db", required=True, type=Path)
+    corpus_exclude.add_argument("--reviewer", required=True)
+    concept_directives = commands.add_parser(
+        "archive-concept-directives", help="Append hash-bound non-authoritative concept dispositions")
+    concept_directives.add_argument("--state-db", required=True, type=Path)
+    concept_directives.add_argument("--reviewer", required=True)
+    repository_route = commands.add_parser(
+        "archive-repository-route", help="Append a hash-bound repository-artifact route")
+    repository_route.add_argument("source_id"); repository_route.add_argument("source_sha256")
+    repository_route.add_argument("repository_name"); repository_route.add_argument("canonical_path", type=Path)
+    repository_route.add_argument("relationship", choices=["SUPERSEDED_REPOSITORY_COPY",
+                                                           "REPOSITORY_PROVENANCE_COPY",
+                                                           "CANONICAL_MATCH"])
+    repository_route.add_argument("--state-db", required=True, type=Path)
+    repository_route.add_argument("--reviewer", required=True); repository_route.add_argument("--reason", required=True)
+    section_tickets = commands.add_parser("archive-section-research-build", help="Build topic-separated draft research tickets")
+    section_tickets.add_argument("--state-db", required=True, type=Path)
+    section_tickets.add_argument("--max-sections", type=int, default=20)
+    section_ticket_export = commands.add_parser("archive-section-research-export", help="Export topic-separated draft research tickets")
+    section_ticket_export.add_argument("--state-db", required=True, type=Path)
+    section_ticket_export.add_argument("--output", required=True, type=Path)
     return root
 
 
@@ -279,6 +370,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.selection_manifest:
                 records = _select_manifest_records(args.root, records, args.selection_manifest)
             with connect_review_batches(args.state_db) as database:
+                if args.deduplicate_hash:
+                    admitted_hashes = {row[0] for row in database.execute(
+                        "SELECT DISTINCT source_sha256 FROM review_sources"
+                    ).fetchall()}
+                    records = _deduplicate_records(records, admitted_hashes, args.limit)
                 admitted = admit_review_sources(database, args.root, records)
                 batch = create_review_batch(database, limit=args.limit)
                 candidate_count = 0
@@ -363,6 +459,119 @@ def main(argv: list[str] | None = None) -> int:
                 imported = import_dataset_allocations(database, args.input)
                 print(json.dumps({"imported": imported, "authority": "none",
                                   "training_authorized": False}, sort_keys=True))
+            return 0
+        if args.command == "archive-family-build":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({**build_family_proposals(database), "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-family-show":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(family_report(database, args.family_id), ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.command == "archive-family-decide":
+            with connect_review_batches(args.state_db) as database:
+                decision_id = decide_boundary(database, args.subject_id, args.subject_sha256,
+                                              args.decision, args.reviewer, args.reason)
+                print(json.dumps({"decision_id": decision_id, "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-family-research":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({"tickets": generate_research_tickets(database, args.family_id),
+                                  "authority": "none"}, ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.command == "archive-family-evidence-import":
+            value = json.loads(args.input.read_text(encoding="utf-8"))
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({"return_id": import_evidence_return(database, value),
+                                  "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-family-synthesis":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(propose_synthesis(database, args.family_id),
+                                 ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.command == "archive-family-audit":
+            with connect_review_batches(args.state_db) as database:
+                report = export_family_audit(database, args.state_db, args.output)
+                print(json.dumps({"output": str(args.output.resolve()),
+                                  "audit_sha256": report["audit_sha256"],
+                                  "ready_for_fine_tuning": report["dataset_audit"]["ready_for_fine_tuning"],
+                                  "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-section-dataset-audit":
+            with connect_review_batches(args.state_db) as database:
+                report = export_section_dataset_audit(database, args.output)
+                print(json.dumps({"output": str(args.output.resolve()),
+                                  "candidate_count": report["candidate_count"],
+                                  "ready_for_human_allocation_review": report["split_proposal"]["ready_for_human_allocation_review"],
+                                  "training_authorized": False, "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-section-dataset-summary":
+            export_section_dataset_summary(args.audit, args.output)
+            print(json.dumps({"output": str(args.output.resolve()), "authority": "none",
+                              "training_authorized": False}, sort_keys=True))
+            return 0
+        if args.command == "archive-section-dataset-materialize":
+            manifest = materialize_approved_section_split(
+                args.audit, args.output_dir, expected_audit_sha256=args.audit_sha256,
+                reviewer=args.reviewer)
+            print(json.dumps({"output": str(args.output_dir.resolve()),
+                              "manifest_sha256": manifest["manifest_sha256"],
+                              "training_authorized": False, "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-section-build":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({**build_section_proposals(database), "authority": "none"},
+                                 sort_keys=True))
+            return 0
+        if args.command == "archive-section-list":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({"proposals": section_review_queue(database), "authority": "none"},
+                                 ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.command == "archive-section-decide":
+            with connect_review_batches(args.state_db) as database:
+                decision_id = decide_section_boundary(
+                    database, args.proposal_id, args.proposal_sha256,
+                    args.decision, args.reviewer, args.reason)
+                print(json.dumps({"decision_id": decision_id, "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-section-summary":
+            with connect_review_batches(args.state_db) as database:
+                values = document_exception_maps(database) if args.all else exception_queue(database)
+                print(json.dumps({"documents": values, "document_count": len(values),
+                                  "authority": "none"}, ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.command == "archive-corpus-exclude":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({**apply_contamination_exclusions(database, reviewer=args.reviewer),
+                                  "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-concept-directives":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({**apply_concept_directives(database, reviewer=args.reviewer),
+                                  "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-repository-route":
+            with connect_review_batches(args.state_db) as database:
+                route_id = route_repository_artifact(
+                    database, source_id=args.source_id, source_sha256=args.source_sha256,
+                    repository_name=args.repository_name, canonical_path=args.canonical_path,
+                    relationship=args.relationship, reviewer=args.reviewer, reason=args.reason)
+                print(json.dumps({"route_id": route_id, "authority": "none",
+                                  "movement_authority": "not_authorized"}, sort_keys=True))
+            return 0
+        if args.command == "archive-section-research-build":
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps({**generate_topic_research_tickets(database,
+                                                                    max_sections=args.max_sections),
+                                  "authority": "none"}, sort_keys=True))
+            return 0
+        if args.command == "archive-section-research-export":
+            with connect_review_batches(args.state_db) as database:
+                count = export_topic_research_tickets(database, args.output)
+                print(json.dumps({"tickets": count, "output": str(args.output.resolve()),
+                                  "authority": "none"}, sort_keys=True))
             return 0
         if args.command == "plugin-batch":
             from sovereign_plugins.contracts import hash_file

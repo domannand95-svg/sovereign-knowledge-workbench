@@ -87,10 +87,12 @@ A new adapter-training run is inadmissible until all of the following are true:
 - at least **100** are assigned `HELD_OUT_LOCKED`;
 - every critical behavior category contains at least **25** examples;
 - no single category exceeds 30 percent of the training set;
-- all admitted examples have decision `APPROVE`;
+- every admitted example has an explicit immutable human dataset allocation;
+- archive dispositions (`APPROVE`, `NEEDS_RESEARCH`, `QUARANTINE`, and `REJECT`) remain
+  supervised labels and do not themselves grant or deny dataset admission;
 - all admitted examples have complete source provenance and a verified source hash;
-- no unresolved, research-only, quarantined, rejected, corrupt, privacy-ineligible, or
-  provenance-incomplete example is admitted; and
+- no corrupt, privacy-ineligible, provenance-incomplete, or merely provider-returned example
+  is admitted; and
 - train and evaluation manifests are frozen and hashed before training begins.
 
 The critical behavior categories are:
@@ -129,7 +131,9 @@ must never move a held-out example into training.
 
 Gemini research returns are `RESEARCH_ONLY` until separately reviewed and transformed into a
 new provenance-bearing example. Provider output is never training-eligible merely because it
-was returned successfully.
+was returned successfully. Archive disposition and dataset admission are independent: a
+human-reviewed `NEEDS_RESEARCH`, `QUARANTINE`, or `REJECT` record may be deliberately admitted
+as a supervised example of that behavior when its privacy and provenance gates pass.
 
 ## 6. Required implementation gates
 
@@ -140,7 +144,8 @@ training is admitted, implementation must prove:
 2. hash-bound research-ticket export and research-evidence-return import;
 3. separate disposition/relationship records without deletion semantics;
 4. immutable source-family dataset allocations;
-5. rejection of every non-`APPROVE` training/evaluation candidate;
+5. explicit dataset admission independent from archive disposition, while preserving the
+   disposition as the expected supervised output;
 6. the 300/100 and per-category balance gates;
 7. train/evaluation family disjointness;
 8. non-overwriting, hash-bearing dataset manifests; and
