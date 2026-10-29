@@ -335,33 +335,34 @@ def test_windows_simulated_session_file_dacl_still_exact_with_owner_rights_prese
 
 
 TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
-CODEX_SANDBOX_OFFLINE = "S-1-5-21-1274397259-2285404289-3631297971-1006"
-CODEX_SANDBOX_USERS = "S-1-5-21-1274397259-2285404289-3631297971-1005"
-# Shape recorded on the owner's laptop (Windows run v3): C:\ owned by TrustedInstaller.
-LAPTOP_ROOT = directory("C:\\", [(0, 3, 0x1F01FF, sp.ADMINISTRATORS_SID), (0, 3, 0x1F01FF, sp.SYSTEM_SID),
+# Synthetic SIDs (same made-up domain as USER) for a sandbox account and a sandbox group.
+SANDBOX_ACCOUNT = "S-1-5-21-1111-2222-3333-1006"
+SANDBOX_GROUP = "S-1-5-21-1111-2222-3333-1005"
+# Shape of a typical Windows system drive root: C:\ owned by TrustedInstaller.
+TYPICAL_ROOT = directory("C:\\", [(0, 3, 0x1F01FF, sp.ADMINISTRATORS_SID), (0, 3, 0x1F01FF, sp.SYSTEM_SID),
                                    (0, 3, 0x1200A9, USERS), (0, 11, 0xE0010000, "S-1-5-11"), (0, 0, 0x4, "S-1-5-11")],
                         owner=TRUSTED_INSTALLER, root=True)
 
 
 def test_windows_simulated_trusted_installer_owned_root_is_accepted():
     profile = directory("C:\\Users\\u", [(0, 3, 0x1F01FF, USER)], owner=sp.ADMINISTRATORS_SID)
-    local = directory("C:\\Users\\u\\AppData\\Local", [(0, 19, 0x1200A9, CODEX_SANDBOX_USERS), (0, 19, 0x1F01FF, USER)], owner=USER)
-    sp.check_windows_location([local, profile, LAPTOP_ROOT], USER)
+    local = directory("C:\\Users\\u\\AppData\\Local", [(0, 19, 0x1200A9, SANDBOX_GROUP), (0, 19, 0x1F01FF, USER)], owner=USER)
+    sp.check_windows_location([local, profile, TYPICAL_ROOT], USER)
 
 
 def test_windows_simulated_trusted_installer_receiving_rights_on_a_folder_is_accepted():
     parent = directory("P", [(0, 0, 0x1F01FF, TRUSTED_INSTALLER)], owner=USER)
-    sp.check_windows_location([parent, LAPTOP_ROOT], USER)
+    sp.check_windows_location([parent, TYPICAL_ROOT], USER)
 
 
 @pytest.mark.parametrize("parent", [
-    directory("repo", [(0, 19, 0x1F01FF, USER)], owner=CODEX_SANDBOX_OFFLINE),                  # sandbox-owned
-    directory("Temp", [(0, 3, 0x1301BF, CODEX_SANDBOX_USERS), (0, 3, 0x1F01FF, USER)], owner=USER),  # outsider-writable
+    directory("repo", [(0, 19, 0x1F01FF, USER)], owner=SANDBOX_ACCOUNT),                  # sandbox-owned
+    directory("Temp", [(0, 3, 0x1301BF, SANDBOX_GROUP), (0, 3, 0x1F01FF, USER)], owner=USER),  # outsider-writable
     directory("svc", [(0, 0, 0x1301BF, "S-1-5-80-1111111111-2222222222-3333333333-4444444444-5555555555")], owner=USER),  # other service SID
 ])
 def test_windows_simulated_trusted_installer_does_not_admit_other_principals(parent):
     with pytest.raises(sp.UntrustedLocationError):
-        sp.check_windows_location([parent, LAPTOP_ROOT], USER)
+        sp.check_windows_location([parent, TYPICAL_ROOT], USER)
 
 
 def test_windows_simulated_session_file_dacl_rejects_a_trusted_installer_entry():
