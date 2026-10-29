@@ -128,7 +128,7 @@ def test_review_export_never_overwrites_and_import_is_hash_bound(tmp_path: Path)
             reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
         rows[0].update({"decision": "NEEDS_RESEARCH", "confidence": "LOW",
                         "review_note": "Context is unclear",
-                        "research_question": "What was this intended to establish?", "reviewer": "Dominic"})
+                        "research_question": "What was this intended to establish?", "reviewer": "Reviewer"})
         with output.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
         assert import_review_csv(database, output) == 1
@@ -253,7 +253,7 @@ def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path)
                         "topic": "Other", "maturity": "Research",
                         "authority": "No authority", "confidence": "LOW",
                         "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
-                        "review_note": "Human reviewed", "reviewer": "Dominic",
+                        "review_note": "Human reviewed", "reviewer": "Reviewer",
                         "research_question": "What evidence supports this?" if index == 0 else ""})
         with review.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
@@ -265,7 +265,7 @@ def test_review_outputs_are_inert_and_training_split_is_disjoint(tmp_path: Path)
         assert manifest["execution_authorized"] is False
         assert len(manifest["items"]) == 19
         assert all(item["status"] == "PROPOSED" for item in manifest["items"])
-        with pytest.raises(ValueError, match="400 approved allocated"):
+        with pytest.raises(ValueError, match="400 human-reviewed allocated"):
             export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
 
 
@@ -297,7 +297,7 @@ def test_research_return_is_ticket_and_source_hash_bound_immutable_and_idempoten
         rows[0].update({"decision": "NEEDS_RESEARCH", "topic": "Other", "maturity": "Research",
                         "authority": "No authority", "confidence": "LOW",
                         "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
-                        "review_note": "Verify claims", "reviewer": "Dominic",
+                        "review_note": "Verify claims", "reviewer": "Reviewer",
                         "research_question": "Which primary evidence supports this?"})
         with review.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
@@ -329,7 +329,7 @@ def test_research_return_rejects_ticket_mismatch_authority_and_hash_tampering(tm
         rows[0].update({"decision": "NEEDS_RESEARCH", "topic": "Other", "maturity": "Research",
                         "authority": "No authority", "confidence": "LOW",
                         "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
-                        "review_note": "Verify", "reviewer": "Dominic", "research_question": "Evidence?"})
+                        "review_note": "Verify", "reviewer": "Reviewer", "research_question": "Evidence?"})
         with review.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
         import_review_csv(database, review); export_research_tickets(database, tickets_path)
@@ -359,7 +359,7 @@ def test_training_split_uses_latest_decision_without_source_leakage(tmp_path: Pa
             row.update({"decision": "APPROVE", "topic": "Other", "maturity": "Research",
                         "authority": "No authority", "confidence": "LOW",
                         "privacy_status": "Reviewed", "canonical_status": "UNRESOLVED",
-                        "review_note": "Initial review", "reviewer": "Dominic"})
+                        "review_note": "Initial review", "reviewer": "Reviewer"})
         with review.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
         assert import_review_csv(database, review) == 20
@@ -368,7 +368,7 @@ def test_training_split_uses_latest_decision_without_source_leakage(tmp_path: Pa
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
         assert import_review_csv(database, review) == 1
 
-        with pytest.raises(ValueError, match="400 approved allocated"):
+        with pytest.raises(ValueError, match="400 human-reviewed allocated"):
             export_training_split(database, tmp_path / "train.jsonl", tmp_path / "eval.jsonl")
 
 
@@ -385,7 +385,7 @@ def _allocation(row: dict[str, str], index: int, allocation: str) -> dict[str, s
         "source_id": row["source_id"], "source_sha256": row["source_sha256"],
         "source_family_id": f"family-{index:03}", "allocation": allocation,
         "behavior_category": DATASET_CATEGORIES[index % len(DATASET_CATEGORIES)],
-        "reviewer": "Dominic", "reason": "Human assigned frozen dataset role",
+        "reviewer": "Reviewer", "reason": "Human assigned frozen dataset role",
     }
     canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     value["allocation_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -400,11 +400,15 @@ def test_dataset_export_requires_approved_immutable_balanced_300_100_allocations
         export_review_csv(database, batch["batch_id"], review)
         with review.open(encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream); fields = reader.fieldnames; rows = list(reader)
-        for row in rows:
-            row.update({"decision": "APPROVE", "topic": "Other", "maturity": "Research",
+        dispositions = ("APPROVE", "NEEDS_RESEARCH", "QUARANTINE", "REJECT")
+        for index, row in enumerate(rows):
+            decision = dispositions[index % len(dispositions)]
+            row.update({"decision": decision, "topic": "Other", "maturity": "Research",
                         "authority": "No authority", "confidence": "HIGH",
-                        "privacy_status": "Reviewed", "canonical_status": "CANONICAL",
-                        "review_note": "Human reviewed for dataset admission", "reviewer": "Dominic"})
+                        "privacy_status": "Reviewed",
+                        "canonical_status": "CANONICAL" if decision == "APPROVE" else "UNRESOLVED",
+                        "review_note": "Human reviewed for dataset admission", "reviewer": "Reviewer",
+                        "research_question": "What evidence resolves this?" if decision == "NEEDS_RESEARCH" else ""})
         with review.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
         assert import_review_csv(database, review) == 400
@@ -423,11 +427,12 @@ def test_dataset_export_requires_approved_immutable_balanced_300_100_allocations
             {row["source_family_id"] for row in eval_examples}
         )
         assert {row["behavior_category"] for row in train_examples + eval_examples} == set(DATASET_CATEGORIES)
+        assert {row["expected"]["decision"] for row in train_examples + eval_examples} == set(dispositions)
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
             database.execute("DELETE FROM archive_dataset_allocations")
 
 
-def test_dataset_allocation_rejects_nonapproved_source_and_family_leakage(tmp_path: Path):
+def test_dataset_allocation_preserves_nonapprove_label_and_rejects_family_leakage(tmp_path: Path):
     source = tmp_path / "source"; source.mkdir(); make_files(source, 2)
     review = tmp_path / "review.csv"; allocation_path = tmp_path / "allocation.jsonl"
     with connect(tmp_path / "state.db") as database:
@@ -439,7 +444,9 @@ def test_dataset_allocation_rejects_nonapproved_source_and_family_leakage(tmp_pa
             row.update({"decision": "APPROVE", "topic": "Other", "maturity": "Research",
                         "authority": "No authority", "confidence": "HIGH",
                         "privacy_status": "Reviewed", "canonical_status": "CANONICAL",
-                        "review_note": "Reviewed", "reviewer": "Dominic"})
+                        "review_note": "Reviewed", "reviewer": "Reviewer"})
+        rows[0].update({"decision": "NEEDS_RESEARCH", "canonical_status": "UNRESOLVED",
+                        "research_question": "Which primary evidence resolves this claim?"})
         with review.open("w", encoding="utf-8-sig", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
         import_review_csv(database, review)
@@ -451,6 +458,10 @@ def test_dataset_allocation_rejects_nonapproved_source_and_family_leakage(tmp_pa
         ).encode()).hexdigest()
         allocation_path.write_text(json.dumps(first) + "\n", encoding="utf-8")
         assert import_dataset_allocations(database, allocation_path) == 1
+        assert database.execute(
+            "SELECT decision FROM archive_review_decisions WHERE source_id=?",
+            (rows[0]["source_id"],),
+        ).fetchone()[0] == "NEEDS_RESEARCH"
         second = _allocation(rows[1], 1, "HELD_OUT_LOCKED")
         second["source_family_id"] = "shared-family"
         second["allocation_sha256"] = hashlib.sha256(json.dumps(
