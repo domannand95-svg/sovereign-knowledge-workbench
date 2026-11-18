@@ -19,6 +19,15 @@ class ModelError(RuntimeError):
 
 
 MAX_RESPONSE_BYTES = 1024 * 1024
+MAX_TIMEOUT_SECONDS = 600
+
+
+def check_limits(timeout: object, max_bytes: object = MAX_RESPONSE_BYTES) -> None:
+    """Refuse limits that would disable the time limit or the reply cap (plain ints only)."""
+    if type(timeout) is not int or not 1 <= timeout <= MAX_TIMEOUT_SECONDS:
+        raise ModelError(f"Model timeout must be a whole number of seconds from 1 to {MAX_TIMEOUT_SECONDS}")
+    if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_RESPONSE_BYTES:
+        raise ModelError(f"Model reply limit must be a whole number of bytes from 1 to {MAX_RESPONSE_BYTES}")
 _IPV4_LOOPBACK = ipaddress.IPv4Network("127.0.0.0/8")
 _IPV6_LOOPBACK = ipaddress.IPv6Address("::1")
 
@@ -78,6 +87,7 @@ def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int, *,
     at the deadline, so a slow or chatty local server cannot hold the caller.
     """
     limit = MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
+    check_limits(timeout, limit)
     if endpoint.scheme == "https":
         connection: http.client.HTTPConnection = http.client.HTTPSConnection(
             endpoint.address, endpoint.port, timeout=timeout, context=ssl.create_default_context())
@@ -191,8 +201,10 @@ def classify_with_local_model(
     except ModelError:
         raise
     except (OSError, http.client.HTTPException) as exc:
-        # The exception text can carry server-chosen bytes (e.g. a malformed status line).
-        raise ModelError(f"Local model request failed closed: {type(exc).__name__}") from None
+        # The exception text can carry server-chosen bytes (e.g. a malformed status line),
+        # so only its type is reported, and the error is raised outside the handler so the
+        # original exception is not attached as context either.
+        failure = f"Local model request failed closed: {type(exc).__name__}"
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        # Only the error type is reported: the message could quote model output or document text.
-        raise ModelError(f"Local model response failed closed: malformed reply ({type(exc).__name__})") from None
+        failure = f"Local model response failed closed: malformed reply ({type(exc).__name__})"
+    raise ModelError(failure)

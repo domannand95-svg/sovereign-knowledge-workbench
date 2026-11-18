@@ -87,3 +87,31 @@ def test_stored_job_with_non_loopback_endpoint_fails_without_sending(tmp_path, c
         connections.clear()
         assert run_pending_schedule(database, max_concurrency=1) == {"completed": 0, "failed": 1}
     assert connections == []
+
+
+BAD_LIMITS = [("timeout_seconds", value) for value in (0, -1, 601, 10**12, 1.5, "5", None, True)] + \
+             [("max_response_bytes", value) for value in (0, -1, -2, 1_048_577, 2**70, "100", 1.5, None, True)]
+
+
+@pytest.mark.parametrize("field,value", BAD_LIMITS)
+def test_unsafe_worker_limits_are_refused_at_load_and_before_any_send(field, value, tmp_path, server_factory, connections):
+    server = server_factory(_reply(200, json.dumps(PROPOSAL).encode()))
+    endpoint = f"http://127.0.0.1:{server.port}/v1"
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps({"contract_version": "sovereign.workbench.models.v1", "workers": [
+        {"worker_id": "w", "model": "m", "roles": ["review"], "endpoint": endpoint, field: value}]}), encoding="utf-8")
+    with pytest.raises(SchedulerError, match="Model (timeout|reply limit)"):
+        load_workers(path)
+    limits = {"timeout_seconds": 5, "max_response_bytes": 1_048_576, field: value}
+    worker = ModelWorker("w", "m", ("review",), endpoint, limits["timeout_seconds"], limits["max_response_bytes"])
+    connections.clear()
+    with pytest.raises(SchedulerError, match="Model (timeout|reply limit)"):
+        _invoke(TASK, worker)
+    assert connections == [] and server.requests == []
+
+
+def test_scheduler_failure_carries_no_original_exception(server_factory):
+    server = server_factory(_reply(200, b'{"choices": "SECRET-REPLY-TEXT"}'))
+    with pytest.raises(SchedulerError) as raised:
+        _invoke(TASK, _worker(f"http://127.0.0.1:{server.port}/v1"))
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
