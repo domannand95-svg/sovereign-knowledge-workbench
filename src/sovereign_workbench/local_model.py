@@ -70,12 +70,14 @@ def validate_endpoint(endpoint: str) -> LoopbackEndpoint:
     return LoopbackEndpoint(parts.scheme, str(address), port or (443 if parts.scheme == "https" else 80), target)
 
 
-def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int) -> bytes:
+def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int, *,
+               max_bytes: int | None = None) -> bytes:
     """POST directly to the validated address: no proxy, no redirects, bounded reply.
 
     `timeout` bounds the whole exchange, not each read: a timer shuts the socket down
     at the deadline, so a slow or chatty local server cannot hold the caller.
     """
+    limit = MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
     if endpoint.scheme == "https":
         connection: http.client.HTTPConnection = http.client.HTTPSConnection(
             endpoint.address, endpoint.port, timeout=timeout, context=ssl.create_default_context())
@@ -108,8 +110,8 @@ def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int) -> bytes:
         response = connection.getresponse()
         if response.status != 200:
             raise ModelError(f"Model endpoint returned HTTP {response.status}; redirects are not followed")
-        payload = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(payload) > MAX_RESPONSE_BYTES:
+        payload = response.read(limit + 1)
+        if len(payload) > limit:
             raise ModelError("Model response exceeded the size limit")
         if expired.is_set() or time.monotonic() > deadline:
             raise ModelError("Model response exceeded the time limit")
