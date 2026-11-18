@@ -1,0 +1,14 @@
+# Line endings are fixed per format so checkouts are byte-identical on every
+# machine, whatever core.autocrlf says. Anything not listed is left untouched.
+* -text
+
+*.py       text eol=lf
+*.md       text eol=lf
+*.json     text eol=lf
+*.toml     text eol=lf
+*.yml      text eol=lf
+*.txt      text eol=lf
+*.ps1      text eol=lf
+*.example  text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
