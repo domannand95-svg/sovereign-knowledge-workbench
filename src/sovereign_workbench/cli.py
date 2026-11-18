@@ -17,10 +17,10 @@ from .staging import (StagingError, build_plan as build_stage_plan, connect as c
                       execute as execute_stage, recover as recover_staging, rollback as rollback_stage,
                       status_counts as staging_status_counts, prepare_retry, validate_execution_preconditions)
 from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
-                             counts as review_batch_counts, create_next as create_review_batch,
+                             counts as review_batch_counts, commit_prepared_batch as commit_prepared_review_batch,
+                             prepare_next as prepare_review_batch,
                              export_review_csv, export_review_xlsx, import_review_csv,
-                             relationship_counts, routing_counts, store_candidates,
-                             store_relationships)
+                             relationship_counts, routing_counts)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
 from .review_batches import import_dataset_allocations, import_research_evidence_returns
@@ -28,7 +28,7 @@ from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
 from .taxonomy import load_taxonomy
-from .local_model import LocalModelConfig, classify_with_local_model
+from .local_model import LocalModelConfig, ModelError, classify_with_local_model
 from .relationships import detect_relationships
 from .family_review import (build_family_proposals, decide_boundary, family_report,
                             generate_research_tickets, import_evidence_return,
@@ -376,23 +376,32 @@ def main(argv: list[str] | None = None) -> int:
                     ).fetchall()}
                     records = _deduplicate_records(records, admitted_hashes, args.limit)
                 admitted = admit_review_sources(database, args.root, records)
-                batch = create_review_batch(database, limit=args.limit)
+                prepared = prepare_review_batch(database, limit=args.limit)
+                batch = None
                 candidate_count = 0
                 relationship_count = 0
-                if batch:
+                model_failures = 0
+                if prepared:
                     taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
                     local_model_config = LocalModelConfig.from_environment() if args.local_model else None
                     by_path = {record.relative_path: record for record in records}
                     candidates = []
-                    for item in batch["items"]:
+                    for item in prepared:
                         record = by_path[item["relative_path"]]
                         classification = classify(record, taxonomy)
-                        if local_model_config and record.extracted_text:
-                            classification = classify_with_local_model(
-                                record, local_model_config,
-                                allowed_modules=[*taxonomy.modules, taxonomy.fallback_module] if taxonomy else None)
-                        epistemic = assess(record)
                         provenance = classification.source
+                        if local_model_config and record.extracted_text:
+                            try:
+                                classification = classify_with_local_model(
+                                    record, local_model_config,
+                                    allowed_modules=[*taxonomy.modules, taxonomy.fallback_module] if taxonomy else None)
+                                provenance = classification.source
+                            except ModelError as exc:
+                                # Same deterministic fallback as `scan`; the failure stays on the record.
+                                model_failures += 1
+                                provenance = (f"{classification.source}; local model failed closed, "
+                                              f"deterministic fallback used: {exc}")
+                        epistemic = assess(record)
                         if local_model_config:
                             provenance += (f"; model={local_model_config.model}; "
                                            f"max_content_chars={local_model_config.max_content_chars}")
@@ -407,16 +416,12 @@ def main(argv: list[str] | None = None) -> int:
                                 taxonomy.fallback_module if taxonomy else "unclassified"
                             },
                             "risk_flags": [finding.kind for finding in privacy_findings(record)]})
-                    candidate_count = store_candidates(database, batch["batch_id"], candidates)
-                    selected_records = [
-                        (item["source_id"], by_path[item["relative_path"]]) for item in batch["items"]
-                    ]
-                    relationship_count = store_relationships(
-                        database, batch["batch_id"],
-                        detect_relationships(selected_records, corpus_records),
-                    )
+                    selected_records = [(item["source_id"], by_path[item["relative_path"]]) for item in prepared]
+                    relationships = detect_relationships(selected_records, corpus_records)
+                    batch, candidate_count, relationship_count = commit_prepared_review_batch(
+                        database, prepared, candidates, relationships, limit=args.limit)
                 print(json.dumps({"admitted": admitted, "candidates": candidate_count,
-                    "relationships": relationship_count,
+                    "relationships": relationship_count, "model_failures": model_failures,
                     "batch": batch, "status": review_batch_counts(database),
                     "routing": routing_counts(database),
                     "relationship_counts": relationship_counts(database)}, sort_keys=True))
