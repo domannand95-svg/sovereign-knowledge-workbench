@@ -543,39 +543,120 @@ def admit(database: sqlite3.Connection, root: Path, records: list[FileRecord]) -
     return admitted
 
 
-def create_next(database: sqlite3.Connection, *, limit: int = 25) -> dict[str, object] | None:
+class BatchLockTimeoutError(ValueError):
+    """Another process held the review database's write lock, so no batch was written."""
+
+
+class StalePreparationError(ValueError):
+    """The pending sources changed after the batch was prepared, so no batch was written."""
+
+
+_PENDING_ITEM_FIELDS = ("source_id", "root", "relative_path", "source_sha256", "size_bytes",
+                        "modified_ns", "extraction_status")
+_PENDING_ITEMS_SQL = (
+    "SELECT source_id,root,relative_path,source_sha256,size_bytes,modified_ns,extraction_status "
+    "FROM review_sources WHERE state='pending' ORDER BY root,relative_path,source_id LIMIT ?"
+)
+
+
+def _check_limit(limit: int) -> None:
     if limit < 1 or limit > 1000:
         raise ValueError("Batch limit must be between 1 and 1000")
-    database.execute("BEGIN IMMEDIATE")
+
+
+def _pending_items(database: sqlite3.Connection, limit: int) -> list[dict[str, object]]:
+    return [dict(zip(_PENDING_ITEM_FIELDS, row, strict=True))
+            for row in database.execute(_PENDING_ITEMS_SQL, (limit,)).fetchall()]
+
+
+def _begin_batch_transaction(database: sqlite3.Connection) -> None:
+    if database.in_transaction:
+        raise RuntimeError("Batch commit refused: the connection is already in a transaction")
     try:
-        rows = database.execute(
-            "SELECT source_id,root,relative_path,source_sha256,size_bytes,modified_ns,extraction_status "
-            "FROM review_sources WHERE state='pending' ORDER BY root,relative_path,source_id LIMIT ?",
-            (limit,),
-        ).fetchall()
-        if not rows:
+        database.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as error:
+        # Only an exact SQLITE_BUSY with no transaction open is a lock timeout. Every other
+        # code (SQLITE_LOCKED, extended busy codes, read-only, I/O) propagates unchanged.
+        if getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_BUSY and not database.in_transaction:
+            raise BatchLockTimeoutError(
+                "Another process is writing to the review database, so the batch transaction never "
+                "started and no batch was written. Admitted sources remain pending; rerun "
+                "archive-batch-create when the other process has finished."
+            ) from error
+        raise
+
+
+def _insert_batch(database: sqlite3.Connection, items: list[dict[str, object]]) -> dict[str, object]:
+    sequence = database.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM review_batches").fetchone()[0]
+    manifest = {"contract_version": "sovereign.workbench.review-batch.v1",
+                "sequence": sequence, "authority": "none", "items": items}
+    canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    manifest_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    batch_id = hashlib.sha256(f"SOVEREIGN_WORKBENCH_REVIEW_BATCH_V1\0{sequence}\0{manifest_sha256}".encode()).hexdigest()
+    database.execute(
+        "INSERT INTO review_batches(batch_id,sequence,item_count,manifest_sha256,created_at) VALUES(?,?,?,?,?)",
+        (batch_id, sequence, len(items), manifest_sha256, _now()),
+    )
+    for ordinal, item in enumerate(items, start=1):
+        database.execute("INSERT INTO review_batch_items(batch_id,ordinal,source_id) VALUES(?,?,?)",
+                         (batch_id, ordinal, item["source_id"]))
+        database.execute("UPDATE review_sources SET state='batched' WHERE source_id=? AND state='pending'",
+                         (item["source_id"],))
+    return {"batch_id": batch_id, "manifest_sha256": manifest_sha256, **manifest}
+
+
+def create_next(database: sqlite3.Connection, *, limit: int = 25) -> dict[str, object] | None:
+    _check_limit(limit)
+    _begin_batch_transaction(database)
+    try:
+        items = _pending_items(database, limit)
+        if not items:
             database.rollback()
             return None
-        sequence = database.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM review_batches").fetchone()[0]
-        items = [dict(zip(("source_id", "root", "relative_path", "source_sha256", "size_bytes",
-                           "modified_ns", "extraction_status"), row, strict=True)) for row in rows]
-        manifest = {"contract_version": "sovereign.workbench.review-batch.v1",
-                    "sequence": sequence, "authority": "none", "items": items}
-        canonical = json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        manifest_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        batch_id = hashlib.sha256(f"SOVEREIGN_WORKBENCH_REVIEW_BATCH_V1\0{sequence}\0{manifest_sha256}".encode()).hexdigest()
-        database.execute(
-            "INSERT INTO review_batches(batch_id,sequence,item_count,manifest_sha256,created_at) VALUES(?,?,?,?,?)",
-            (batch_id, sequence, len(items), manifest_sha256, _now()),
-        )
-        for ordinal, item in enumerate(items, start=1):
-            database.execute("INSERT INTO review_batch_items(batch_id,ordinal,source_id) VALUES(?,?,?)",
-                             (batch_id, ordinal, item["source_id"]))
-            database.execute("UPDATE review_sources SET state='batched' WHERE source_id=? AND state='pending'",
-                             (item["source_id"],))
+        batch = _insert_batch(database, items)
         database.commit()
-        return {"batch_id": batch_id, "manifest_sha256": manifest_sha256, **manifest}
-    except Exception:
+        return batch
+    except BaseException:
+        database.rollback()
+        raise
+
+
+def prepare_next(database: sqlite3.Connection, *, limit: int = 25) -> list[dict[str, object]]:
+    """Read the sources the next batch would contain, without writing or locking anything."""
+    _check_limit(limit)
+    return _pending_items(database, limit)
+
+
+def commit_prepared_batch(
+    database: sqlite3.Connection,
+    prepared: list[dict[str, object]],
+    candidates: list[dict[str, object]],
+    relationships: list[dict[str, object]],
+    *,
+    limit: int,
+) -> tuple[dict[str, object], int, int]:
+    """Write the batch, its candidates and its relationships in one transaction.
+
+    The pending sources are read again under the write lock and must equal the prepared
+    ones field for field; otherwise nothing is written. Any failure rolls everything back,
+    leaving the sources pending.
+    """
+    _check_limit(limit)
+    if not prepared:
+        raise ValueError("A prepared batch must contain at least one source")
+    _begin_batch_transaction(database)
+    try:
+        if _pending_items(database, limit) != prepared:
+            raise StalePreparationError(
+                "The pending sources changed while this batch was being prepared, so no batch was "
+                "written. Rerun archive-batch-create."
+            )
+        batch = _insert_batch(database, prepared)
+        candidate_count = store_candidates(database, str(batch["batch_id"]), candidates, commit=False)
+        relationship_count = store_relationships(database, str(batch["batch_id"]), relationships, commit=False)
+        database.commit()
+        return batch, candidate_count, relationship_count
+    except BaseException:
         database.rollback()
         raise
 
@@ -793,7 +874,7 @@ def _route_candidate(extraction_status: str, candidate: dict[str, object]) -> tu
 
 
 def store_candidates(database: sqlite3.Connection, batch_id: str,
-                     candidates: list[dict[str, object]]) -> int:
+                     candidates: list[dict[str, object]], *, commit: bool = True) -> int:
     stored = 0
     for candidate in candidates:
         bound = database.execute(
@@ -825,12 +906,13 @@ def store_candidates(database: sqlite3.Connection, batch_id: str,
             (value["source_id"], batch_id, route, json.dumps(reasons, separators=(",", ":")),
              confidence, route_digest, _now()),
         )
-    database.commit()
+    if commit:
+        database.commit()
     return stored
 
 
 def store_relationships(database: sqlite3.Connection, batch_id: str,
-                        relationships: list[dict[str, object]]) -> int:
+                        relationships: list[dict[str, object]], *, commit: bool = True) -> int:
     stored = 0
     for relationship in relationships:
         source_id = str(relationship.get("source_id", ""))
@@ -866,7 +948,8 @@ def store_relationships(database: sqlite3.Connection, batch_id: str,
              related_sha256, confidence, evidence, "NONE", _now()),
         )
         stored += cursor.rowcount
-    database.commit()
+    if commit:
+        database.commit()
     return stored
 
 
