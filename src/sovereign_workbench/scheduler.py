@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import http.client
 import json
 import hashlib
 import sqlite3
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .local_model import ModelError, _post_json, validate_endpoint
 from .runner_ownership import exclusive_runner, OwnershipLostError
 
 
@@ -41,6 +42,11 @@ def load_workers(path: Path) -> tuple[int, list[ModelWorker]]:
     ) for item in value.get("workers", [])]
     if not workers or len({worker.worker_id for worker in workers}) != len(workers):
         raise SchedulerError("Model workers must be present and uniquely identified")
+    for worker in workers:
+        try:
+            validate_endpoint(worker.endpoint)
+        except ModelError as exc:
+            raise SchedulerError(f"Worker {worker.worker_id}: {exc}") from None
     return concurrency, workers
 
 
@@ -76,13 +82,21 @@ def _invoke(task: dict, worker: ModelWorker) -> dict:
             {"role": "user", "content": task["prompt"][:20_000]},
         ],
     }).encode()
-    request = urllib.request.Request(worker.endpoint, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=worker.timeout_seconds) as response:
-        raw = response.read(worker.max_response_bytes + 1)
-        if len(raw) > worker.max_response_bytes:
-            raise SchedulerError("Model response exceeded configured byte limit")
-        envelope = json.loads(raw.decode())
-    proposal = json.loads(envelope["choices"][0]["message"]["content"])
+    # Same transport as the local classifier: literal loopback only, no proxy, no redirects,
+    # total time limit, bounded reply. Validated again here because stored jobs carry their
+    # own endpoint and callers may build workers without load_workers().
+    try:
+        endpoint = validate_endpoint(worker.endpoint)
+        raw = _post_json(endpoint, body, worker.timeout_seconds, max_bytes=worker.max_response_bytes)
+    except ModelError as exc:
+        raise SchedulerError(str(exc)) from None
+    except (OSError, http.client.HTTPException) as exc:
+        raise SchedulerError(f"Model request failed closed: {type(exc).__name__}") from None
+    try:
+        envelope = json.loads(raw.decode("utf-8"))
+        proposal = json.loads(envelope["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise SchedulerError(f"Model response failed closed: malformed reply ({type(exc).__name__})") from None
     return {"task_id": task["task_id"], "worker_id": worker.worker_id, "model": worker.model,
             "status": "candidate", "authority": "none", "proposal": proposal}
 
