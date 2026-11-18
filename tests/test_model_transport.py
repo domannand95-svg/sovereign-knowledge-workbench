@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -46,6 +48,8 @@ REJECTED = [
     "file:///etc/passwd",
     "127.0.0.1:11434/v1",
     "http://127.0.0.1:99999/v1",
+    "http://127.0.0.1:0/v1",
+    "http://127.0.0.1:/v1",
     "http://127.0.0.1:11434/v1\r\nX-Injected: 1",
     "http://127.0.0.1:11434/v1 ",
     "",
@@ -60,24 +64,28 @@ ACCEPTED = [
 ]
 
 
+_AUDITED = ("socket.connect", "socket.sendto", "socket.sendmsg", "socket.getaddrinfo",
+            "socket.gethostbyname", "socket.gethostbyname_ex", "socket.gethostbyaddr", "subprocess.Popen")
+_RECORDING: list[list[tuple[str, object]]] = []
+
+
+def _audit(event, args):
+    if _RECORDING and event in _AUDITED:
+        _RECORDING[-1].append((event, args))
+
+
+sys.addaudithook(_audit)  # audit hooks cannot be removed; it records only while a test is recording
+
+
 @pytest.fixture
-def connections(monkeypatch):
-    """Record every outbound connection attempt made through the socket layer."""
-    attempts: list[object] = []
-    real_connect = socket.socket.connect
-    real_create = socket.create_connection
-
-    def connect(sock, address):
-        attempts.append(address)
-        return real_connect(sock, address)
-
-    def create_connection(address, *args, **kwargs):
-        attempts.append(address)
-        return real_create(address, *args, **kwargs)
-
-    monkeypatch.setattr(socket.socket, "connect", connect)
-    monkeypatch.setattr(socket, "create_connection", create_connection)
-    return attempts
+def connections():
+    """Record every network-relevant event: connect (incl. connect_ex), sendto, sendmsg, DNS, subprocess."""
+    events: list[tuple[str, object]] = []
+    _RECORDING.append(events)
+    try:
+        yield events
+    finally:
+        _RECORDING.remove(events)
 
 
 @pytest.mark.parametrize("endpoint", REJECTED)
@@ -186,3 +194,82 @@ def test_unreachable_loopback_fails_closed():
         port = probe.getsockname()[1]
     with pytest.raises(ModelError):
         classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{port}/v1", model="m"))
+
+
+def test_meta_recorder_sees_routes_the_old_recorder_missed(connections):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0)); listener.listen(1)
+        port = listener.getsockname()[1]
+        with socket.socket() as client:
+            client.connect_ex(("127.0.0.1", port))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+            udp.sendto(b"x", ("127.0.0.1", port))
+    events = {event for event, _ in connections}
+    assert {"socket.connect", "socket.sendto"} <= events
+
+
+def _trickle(chunks: list[bytes], delay: float):
+    def handler(request):
+        request.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+        request.wfile.flush()
+        for chunk in chunks:
+            time.sleep(delay)
+            try:
+                request.wfile.write(chunk); request.wfile.flush()
+            except OSError:
+                return
+    return handler
+
+
+def test_slow_reply_is_bounded_by_total_time(server_factory):
+    server = server_factory(_trickle([b"x"] * 40, 0.25))  # 10 s of trickle; each read is quick
+    started = time.monotonic()
+    with pytest.raises(ModelError, match="time limit"):
+        classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1",
+                                                           model="m", timeout_seconds=1))
+    assert time.monotonic() - started < 3
+
+
+def test_continue_flood_is_bounded_by_total_time(server_factory):
+    def flood(request):
+        for _ in range(40):
+            time.sleep(0.25)
+            try:
+                request.wfile.write(b"HTTP/1.1 100 Continue\r\n\r\n"); request.wfile.flush()
+            except OSError:
+                return
+    server = server_factory(flood)
+    started = time.monotonic()
+    with pytest.raises(ModelError, match="time limit"):
+        classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1",
+                                                           model="m", timeout_seconds=1))
+    assert time.monotonic() - started < 3
+
+
+@pytest.mark.parametrize("headers", [{"Transfer-Encoding": "chunked"}, {}])
+def test_reply_without_length_is_still_capped(server_factory, monkeypatch, headers):
+    monkeypatch.setattr(local_model, "MAX_RESPONSE_BYTES", 1024)
+
+    def big(request):
+        request.send_response(200)
+        for key, value in headers.items():
+            request.send_header(key, value)
+        request.send_header("Connection", "close")
+        request.end_headers()
+        data = b"x" * 4096
+        if headers:
+            request.wfile.write(b"%x\r\n%s\r\n0\r\n\r\n" % (len(data), data))
+        else:
+            request.wfile.write(data)
+    server = server_factory(big)
+    with pytest.raises(ModelError, match="size limit"):
+        classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1", model="m"))
+
+
+def test_malformed_reply_does_not_echo_its_content(server_factory):
+    reply = {"choices": [{"message": {"content": json.dumps(
+        {"module": "research", "confidence": "SECRET-DOC-TEXT", "labels": []})}}]}
+    server = server_factory(_reply(200, json.dumps(reply).encode()))
+    with pytest.raises(ModelError) as caught:
+        classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1", model="m"))
+    assert "SECRET-DOC-TEXT" not in str(caught.value)
