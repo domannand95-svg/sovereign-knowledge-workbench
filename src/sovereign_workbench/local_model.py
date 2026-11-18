@@ -4,7 +4,10 @@ import http.client
 import ipaddress
 import json
 import os
+import socket
 import ssl
+import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 
@@ -48,6 +51,8 @@ def validate_endpoint(endpoint: str) -> LoopbackEndpoint:
         raise ModelError("Model endpoint must use http or https")
     if parts.username is not None or parts.password is not None or "@" in parts.netloc:
         raise ModelError("Model endpoint must not contain credentials")
+    if port == 0 or parts.netloc.endswith(":"):
+        raise ModelError("Model endpoint port must be 1-65535 when given")
     host = parts.hostname or ""
     try:
         address = ipaddress.ip_address(host)
@@ -66,12 +71,31 @@ def validate_endpoint(endpoint: str) -> LoopbackEndpoint:
 
 
 def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int) -> bytes:
-    """POST directly to the validated address: no proxy, no redirects, bounded reply."""
+    """POST directly to the validated address: no proxy, no redirects, bounded reply.
+
+    `timeout` bounds the whole exchange, not each read: a timer shuts the socket down
+    at the deadline, so a slow or chatty local server cannot hold the caller.
+    """
     if endpoint.scheme == "https":
         connection: http.client.HTTPConnection = http.client.HTTPSConnection(
             endpoint.address, endpoint.port, timeout=timeout, context=ssl.create_default_context())
     else:
         connection = http.client.HTTPConnection(endpoint.address, endpoint.port, timeout=timeout)
+    expired = threading.Event()
+
+    def stop() -> None:
+        expired.set()
+        sock = connection.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    deadline = time.monotonic() + timeout
+    timer = threading.Timer(timeout, stop)
+    timer.daemon = True
+    timer.start()
     try:
         connection.request("POST", endpoint.target, body=body, headers={"Content-Type": "application/json"})
         response = connection.getresponse()
@@ -80,8 +104,17 @@ def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int) -> bytes:
         payload = response.read(MAX_RESPONSE_BYTES + 1)
         if len(payload) > MAX_RESPONSE_BYTES:
             raise ModelError("Model response exceeded the size limit")
+        if expired.is_set() or time.monotonic() > deadline:
+            raise ModelError("Model response exceeded the time limit")
         return payload
+    except ModelError:
+        raise
+    except Exception as exc:
+        if expired.is_set():
+            raise ModelError("Model response exceeded the time limit") from exc
+        raise
     finally:
+        timer.cancel()
         connection.close()
 
 
@@ -148,5 +181,8 @@ def classify_with_local_model(
         return Classification(module, confidence, labels, str(value.get("summary", ""))[:1000], "local_model_candidate")
     except ModelError:
         raise
-    except (OSError, http.client.HTTPException, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ModelError(f"Local model response failed closed: {exc}") from exc
+    except (OSError, http.client.HTTPException) as exc:
+        raise ModelError(f"Local model request failed closed: {type(exc).__name__}: {exc}") from exc
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        # Only the error type is reported: the message could quote model output or document text.
+        raise ModelError(f"Local model response failed closed: malformed reply ({type(exc).__name__})") from exc
