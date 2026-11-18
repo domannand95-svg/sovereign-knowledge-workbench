@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import threading
@@ -64,8 +65,11 @@ ACCEPTED = [
 ]
 
 
-_AUDITED = ("socket.connect", "socket.sendto", "socket.sendmsg", "socket.getaddrinfo",
-            "socket.gethostbyname", "socket.gethostbyname_ex", "socket.gethostbyaddr", "subprocess.Popen")
+_AUDITED = ("socket.connect", "socket.sendto", "socket.sendmsg", "socket.getaddrinfo", "socket.getnameinfo",
+            "socket.gethostbyname", "socket.gethostbyname_ex", "socket.gethostbyaddr", "subprocess.Popen",
+            "os.system", "os.posix_spawn", "os.spawn", "os.exec", "os.fork")
+# Not observable this way: sends on an already-connected socket that was inherited or duplicated.
+# The code under test never receives such a socket.
 _RECORDING: list[list[tuple[str, object]]] = []
 
 
@@ -208,9 +212,35 @@ def test_meta_recorder_sees_routes_the_old_recorder_missed(connections):
     assert {"socket.connect", "socket.sendto"} <= events
 
 
-def _trickle(chunks: list[bytes], delay: float):
+def test_meta_recorder_sees_dns_and_process_routes(connections):
+    socket.getaddrinfo("127.0.0.1", 9)
+    socket.getnameinfo(("127.0.0.1", 9), 0)
+    import subprocess
+    subprocess.run([sys.executable, "-c", "pass"], check=True)
+    os.system(f'"{sys.executable}" -c pass')
+    events = {event for event, _ in connections}
+    assert {"socket.getaddrinfo", "socket.getnameinfo", "subprocess.Popen", "os.system"} <= events
+
+
+@pytest.mark.skipif(not hasattr(socket.socket, "sendmsg"), reason="sendmsg is POSIX only")
+def test_meta_recorder_sees_sendmsg(connections):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+        udp.sendmsg([b"x"], [], 0, ("127.0.0.1", 9))
+    assert "socket.sendmsg" in {event for event, _ in connections}
+
+
+TRICKLE_HEADERS = {
+    "keep-alive": b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n",
+    "close": b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
+    "http-1.0": b"HTTP/1.0 200 OK\r\nContent-Length: 1000\r\n\r\n",
+    "no-length": b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+    "chunked-close": b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1000\r\n",
+}
+
+
+def _trickle(chunks: list[bytes], delay: float, head: bytes = TRICKLE_HEADERS["keep-alive"]):
     def handler(request):
-        request.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+        request.wfile.write(head)
         request.wfile.flush()
         for chunk in chunks:
             time.sleep(delay)
@@ -221,8 +251,11 @@ def _trickle(chunks: list[bytes], delay: float):
     return handler
 
 
-def test_slow_reply_is_bounded_by_total_time(server_factory):
-    server = server_factory(_trickle([b"x"] * 40, 0.25))  # 10 s of trickle; each read is quick
+@pytest.mark.parametrize("framing", sorted(TRICKLE_HEADERS))
+def test_slow_reply_is_bounded_by_total_time(server_factory, framing):
+    # 10 s of trickle; each read is quick. Replies that close the connection are included because
+    # http.client drops its socket reference for them, which once let them outlive the deadline.
+    server = server_factory(_trickle([b"x"] * 40, 0.25, TRICKLE_HEADERS[framing]))
     started = time.monotonic()
     with pytest.raises(ModelError, match="time limit"):
         classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1",
@@ -273,3 +306,15 @@ def test_malformed_reply_does_not_echo_its_content(server_factory):
     with pytest.raises(ModelError) as caught:
         classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1", model="m"))
     assert "SECRET-DOC-TEXT" not in str(caught.value)
+
+
+@pytest.mark.parametrize("status_line", [b"SECRET-DOC-TEXT 200 OK", b"HTTP/1.1 2SECRET-DOC-TEXT OK",
+                                         b"HTTP/SECRET-DOC-TEXT 200 OK"])
+def test_malformed_status_line_is_not_echoed(server_factory, status_line):
+    def handler(request):
+        request.wfile.write(status_line + b"\r\n\r\n"); request.wfile.flush()
+    server = server_factory(handler)
+    with pytest.raises(ModelError) as raised:
+        classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1", model="m"))
+    assert "SECRET" not in str(raised.value)
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__  # tracebacks do not show the cause
