@@ -317,4 +317,14 @@ def test_malformed_status_line_is_not_echoed(server_factory, status_line):
     with pytest.raises(ModelError) as raised:
         classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1", model="m"))
     assert "SECRET" not in str(raised.value)
-    assert raised.value.__cause__ is None and raised.value.__suppress_context__  # tracebacks do not show the cause
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 601, 10**12, 1.5, True])
+def test_unsafe_timeout_fails_closed_before_any_send(timeout, server_factory, connections):
+    server = server_factory(_reply(200, json.dumps(GOOD_REPLY).encode()))
+    connections.clear()
+    with pytest.raises(ModelError, match="Model timeout"):
+        classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1",
+                                                           model="m", timeout_seconds=timeout))
+    assert connections == [] and server.requests == []

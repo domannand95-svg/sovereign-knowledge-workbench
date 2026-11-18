@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .local_model import ModelError, _post_json, validate_endpoint
+from .local_model import ModelError, _post_json, check_limits, validate_endpoint
 from .runner_ownership import exclusive_runner, OwnershipLostError
 
 
@@ -37,14 +37,15 @@ def load_workers(path: Path) -> tuple[int, list[ModelWorker]]:
     workers = [ModelWorker(
         str(item["worker_id"]), str(item["model"]), tuple(map(str, item["roles"])),
         str(item.get("endpoint", "http://127.0.0.1:11434/v1/chat/completions")),
-        int(item.get("timeout_seconds", 120)),
-        int(item.get("max_response_bytes", 1_048_576)),
+        item.get("timeout_seconds", 120),
+        item.get("max_response_bytes", 1_048_576),
     ) for item in value.get("workers", [])]
     if not workers or len({worker.worker_id for worker in workers}) != len(workers):
         raise SchedulerError("Model workers must be present and uniquely identified")
     for worker in workers:
         try:
             validate_endpoint(worker.endpoint)
+            check_limits(worker.timeout_seconds, worker.max_response_bytes)
         except ModelError as exc:
             raise SchedulerError(f"Worker {worker.worker_id}: {exc}") from None
     return concurrency, workers
@@ -85,18 +86,21 @@ def _invoke(task: dict, worker: ModelWorker) -> dict:
     # Same transport as the local classifier: literal loopback only, no proxy, no redirects,
     # total time limit, bounded reply. Validated again here because stored jobs carry their
     # own endpoint and callers may build workers without load_workers().
+    failure = None
     try:
         endpoint = validate_endpoint(worker.endpoint)
+        check_limits(worker.timeout_seconds, worker.max_response_bytes)
         raw = _post_json(endpoint, body, worker.timeout_seconds, max_bytes=worker.max_response_bytes)
-    except ModelError as exc:
-        raise SchedulerError(str(exc)) from None
-    except (OSError, http.client.HTTPException) as exc:
-        raise SchedulerError(f"Model request failed closed: {type(exc).__name__}") from None
-    try:
         envelope = json.loads(raw.decode("utf-8"))
         proposal = json.loads(envelope["choices"][0]["message"]["content"])
+    except ModelError as exc:
+        failure = str(exc)
+    except (OSError, http.client.HTTPException) as exc:
+        failure = f"Model request failed closed: {type(exc).__name__}"
     except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise SchedulerError(f"Model response failed closed: malformed reply ({type(exc).__name__})") from None
+        failure = f"Model response failed closed: malformed reply ({type(exc).__name__})"
+    if failure is not None:  # raised outside the handlers so no original exception is attached
+        raise SchedulerError(failure)
     return {"task_id": task["task_id"], "worker_id": worker.worker_id, "model": worker.model,
             "status": "candidate", "authority": "none", "proposal": proposal}
 
