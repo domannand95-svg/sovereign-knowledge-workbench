@@ -128,13 +128,15 @@ def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int, *,
         return payload
     except ModelError:
         raise
-    except Exception as exc:
-        if expired.is_set():
-            raise ModelError("Model response exceeded the time limit") from exc
-        raise
+    except Exception:
+        if not expired.is_set():
+            raise
+        # Partial reply bytes can sit on the original exception (e.g. IncompleteRead.partial),
+        # so the time-limit error is raised outside the handler with nothing attached.
     finally:
         timer.cancel()
         connection.close()
+    raise ModelError("Model response exceeded the time limit")
 
 
 @dataclass(frozen=True)

@@ -328,3 +328,15 @@ def test_unsafe_timeout_fails_closed_before_any_send(timeout, server_factory, co
         classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1",
                                                            model="m", timeout_seconds=timeout))
     assert connections == [] and server.requests == []
+
+
+def test_time_limit_error_carries_no_partial_reply(server_factory):
+    def stall(request):
+        request.wfile.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nf\r\nSECRET-DOC-TEXT\r\n")
+        request.wfile.flush()
+        time.sleep(3)
+    server = server_factory(stall)
+    with pytest.raises(ModelError, match="time limit") as raised:
+        classify_with_local_model(RECORD, LocalModelConfig(endpoint=f"http://127.0.0.1:{server.port}/v1",
+                                                           model="m", timeout_seconds=1))
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
