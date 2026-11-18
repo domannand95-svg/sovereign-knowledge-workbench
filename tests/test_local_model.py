@@ -14,14 +14,14 @@ def record(text: str) -> FileRecord:
 
 
 def test_local_model_content_is_bounded_by_configuration():
-    config = LocalModelConfig("http://local.invalid", "bounded-model", max_content_chars=1_000)
+    config = LocalModelConfig("http://127.0.0.1:9/v1", "bounded-model", max_content_chars=1_000)
     envelope = {"choices": [{"message": {"content": json.dumps({
         "module": "research", "confidence": 0.8, "labels": [], "summary": "bounded"
     })}}]}
-    with patch("sovereign_workbench.local_model.urllib.request.urlopen") as opener:
-        opener.return_value.__enter__.return_value.read.return_value = json.dumps(envelope).encode()
+    with patch("sovereign_workbench.local_model._post_json") as post:
+        post.return_value = json.dumps(envelope).encode()
         result = classify_with_local_model(record("x" * 2_000), config)
-    request_body = json.loads(opener.call_args.args[0].data)
+    request_body = json.loads(post.call_args.args[1])
     prompt = json.loads(request_body["messages"][1]["content"])
     assert len(prompt["content"]) == 1_000
     assert result.source == "local_model_candidate"
