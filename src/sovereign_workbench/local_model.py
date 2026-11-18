@@ -128,8 +128,10 @@ def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int, *,
         return payload
     except ModelError:
         raise
-    except Exception:
-        if not expired.is_set():
+    except Exception as exc:
+        # The socket's own timeout equals the total limit, so on some platforms it fires
+        # just before the timer does; either way the time limit was reached.
+        if not (expired.is_set() or isinstance(exc, TimeoutError)):
             raise
         # Partial reply bytes can sit on the original exception (e.g. IncompleteRead.partial),
         # so the time-limit error is raised outside the handler with nothing attached.
