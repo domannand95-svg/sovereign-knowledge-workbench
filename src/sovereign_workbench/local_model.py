@@ -82,21 +82,28 @@ def _post_json(endpoint: LoopbackEndpoint, body: bytes, timeout: int) -> bytes:
     else:
         connection = http.client.HTTPConnection(endpoint.address, endpoint.port, timeout=timeout)
     expired = threading.Event()
+    sockets: list[socket.socket] = []
 
     def stop() -> None:
+        # http.client drops connection.sock once a reply says it will close, while the
+        # reply keeps reading from the same socket; so shut down every socket we have seen.
         expired.set()
-        sock = connection.sock
-        if sock is not None:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+        for sock in [*sockets, connection.sock]:
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
 
     deadline = time.monotonic() + timeout
     timer = threading.Timer(timeout, stop)
     timer.daemon = True
     timer.start()
     try:
+        connection.connect()
+        sockets.append(connection.sock)
+        if expired.is_set():  # the timer fired during connect, before the socket was held
+            raise ModelError("Model response exceeded the time limit")
         connection.request("POST", endpoint.target, body=body, headers={"Content-Type": "application/json"})
         response = connection.getresponse()
         if response.status != 200:
@@ -182,7 +189,8 @@ def classify_with_local_model(
     except ModelError:
         raise
     except (OSError, http.client.HTTPException) as exc:
-        raise ModelError(f"Local model request failed closed: {type(exc).__name__}: {exc}") from exc
+        # The exception text can carry server-chosen bytes (e.g. a malformed status line).
+        raise ModelError(f"Local model request failed closed: {type(exc).__name__}") from None
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
         # Only the error type is reported: the message could quote model output or document text.
-        raise ModelError(f"Local model response failed closed: malformed reply ({type(exc).__name__})") from exc
+        raise ModelError(f"Local model response failed closed: malformed reply ({type(exc).__name__})") from None
