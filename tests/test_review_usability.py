@@ -160,3 +160,11 @@ def test_long_verified_text_is_marked_truncated(tmp_path):
     digest = hashlib.sha256(b"x" * 50).hexdigest()
     shown = read_verified_text(str(tmp_path), "a.txt", digest, max_chars=10)
     assert (shown["verified"], shown["text"], shown["truncated"]) == (True, "x" * 10, True)
+
+
+def test_page_keeps_access_on_reload_and_blocks_decisions_on_unverified_files():
+    # Behaviour is exercised in a real browser by test_review_page_browser.py; these
+    # checks keep the safeguards visible where no browser is available (e.g. CI).
+    assert 'sessionStorage.setItem(tokenKey,token)' in HTML
+    assert "docVerified&&" in HTML and 'id="recheck"' in HTML
+    assert "A decision cannot be recorded for this file until it matches the imported version again" in HTML
