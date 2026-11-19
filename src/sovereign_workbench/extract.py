@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
@@ -17,7 +19,7 @@ DOCX_MAX_COMPRESSION_RATIO = 200
 WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
-def _extract_docx(path: Path, max_chars: int) -> tuple[str | None, str]:
+def _extract_docx(path: Path | BinaryIO, max_chars: int) -> tuple[str | None, str]:
     try:
         with ZipFile(path) as archive:
             if len(archive.infolist()) > DOCX_MAX_MEMBERS:
@@ -72,6 +74,34 @@ def extract_text(path: Path, *, max_chars: int = 200_000) -> tuple[str | None, s
             return None, "pdf_dependency_missing"
         try:
             text = "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
+            return text[:max_chars], "extracted"
+        except Exception:
+            return None, "pdf_extraction_failed"
+    return None, "unsupported_type"
+
+
+def extract_text_from_bytes(data: bytes, suffix: str, *,
+                            max_chars: int = 200_000) -> tuple[str | None, str]:
+    """Extract text from bytes the caller has already verified.
+
+    Working from the exact bytes that were hashed means the text cannot come from a
+    different version of the file than the one whose identity was checked.
+    """
+    suffix = suffix.casefold()
+    if suffix in TEXT_SUFFIXES:
+        try:
+            return data.decode("utf-8", errors="strict")[:max_chars], "extracted"
+        except UnicodeDecodeError:
+            return None, "invalid_utf8"
+    if suffix == ".docx":
+        return _extract_docx(BytesIO(data), max_chars)
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            return None, "pdf_dependency_missing"
+        try:
+            text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(data)).pages)
             return text[:max_chars], "extracted"
         except Exception:
             return None, "pdf_extraction_failed"

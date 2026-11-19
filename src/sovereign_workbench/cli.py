@@ -23,6 +23,7 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              relationship_counts, routing_counts)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
+from .search import search_archive
 from .review_batches import import_dataset_allocations, import_research_evidence_returns
 from .intake import scan_files
 from .analysis import classify, privacy_findings
@@ -189,6 +190,10 @@ def parser() -> argparse.ArgumentParser:
     batch_import.add_argument("review_csv", type=Path); batch_import.add_argument("--state-db", required=True, type=Path)
     batch_status = commands.add_parser("archive-batch-status", help="Show durable archive review counts")
     batch_status.add_argument("--state-db", required=True, type=Path)
+    archive_search = commands.add_parser("archive-search", help="Search admitted sources read-only, verifying each file against its intake hash")
+    archive_search.add_argument("query"); archive_search.add_argument("--state-db", required=True, type=Path)
+    archive_search.add_argument("--limit", type=int, default=50)
+    archive_search.add_argument("--max-file-mb", type=int, default=20)
     research_export = commands.add_parser("archive-research-export", help="Export approved draft research tickets")
     research_export.add_argument("--state-db", required=True, type=Path); research_export.add_argument("--output", required=True, type=Path)
     research_import = commands.add_parser("archive-research-import", help="Import immutable hash-bound returned research evidence")
@@ -441,6 +446,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"status": review_batch_counts(database),
                                   "routing": routing_counts(database),
                                   "relationship_counts": relationship_counts(database)}, sort_keys=True))
+            return 0
+        if args.command == "archive-search":
+            if not args.state_db.is_file():
+                raise ValueError("The review database does not exist; nothing has been admitted")
+            with connect_review_batches(args.state_db) as database:
+                print(json.dumps(search_archive(database, args.query, limit=args.limit,
+                                                max_file_bytes=args.max_file_mb * 1024 * 1024),
+                                 ensure_ascii=False, sort_keys=True))
             return 0
         if args.command == "archive-research-export":
             with connect_review_batches(args.state_db) as database:
