@@ -94,7 +94,7 @@ def test_document_text_requires_the_access_token_and_a_known_source(screen):
     _, _, call = screen
     item = call("GET", "/api/next")[1]["item"]
     assert call("GET", f"/api/source?source_id={item['source_id']}", auth=False)[0] == 401
-    assert call("GET", "/api/source?source_id=unknown")[0] == 404
+    assert call("GET", "/api/source?source_id=unknown")[0] == 409
     assert call("GET", "/api/source")[0] == 400
 
 
@@ -127,7 +127,36 @@ def test_search_groups_identical_copies_and_labels_metadata(archive, capsys):
     paths = sorted(hit["relative_path"] for hit in found["results"])
     assert paths == ["log-copy.txt", "log.txt"]  # both stay visible with their own identity
     for hit in found["results"]:
-        [twin] = hit["identical_to"]
+        [twin] = hit["identical_at_import"]
         assert twin["relative_path"] != hit["relative_path"]
         assert twin["intake_root"] == hit["intake_root"]
         assert hit["metadata_match_labels"] == ["Workbench-generated summary"]
+
+
+def test_only_the_current_item_is_served(screen):
+    _, db, call = screen
+    first = call("GET", "/api/next")[1]["item"]
+    with connect(db) as database:
+        other = database.execute("SELECT source_id FROM review_sources WHERE source_id<>?",
+                                 (first["source_id"],)).fetchone()[0]
+    status, reply = call("GET", f"/api/source?source_id={other}")
+    assert status == 409 and "currently under review" in reply["error"]
+    call("POST", "/api/decision", {"source_id": first["source_id"], "decision": "APPROVE",
+                                   "note": "checked", "research_question": ""})
+    assert call("GET", f"/api/source?source_id={first['source_id']}")[0] == 409  # decided
+
+
+def test_identical_copies_beyond_the_result_limit_are_still_named(archive, capsys):
+    _, db = archive
+    found = _run(capsys, "archive-search", "grevillea", "--state-db", str(db), "--limit", "1")
+    [hit] = found["results"]
+    assert found["truncated"] is True and len(hit["identical_at_import"]) == 1
+
+
+def test_long_verified_text_is_marked_truncated(tmp_path):
+    import hashlib
+    from sovereign_workbench.search import read_verified_text
+    (tmp_path / "a.txt").write_text("x" * 50, encoding="utf-8")
+    digest = hashlib.sha256(b"x" * 50).hexdigest()
+    shown = read_verified_text(str(tmp_path), "a.txt", digest, max_chars=10)
+    assert (shown["verified"], shown["text"], shown["truncated"]) == (True, "x" * 10, True)
