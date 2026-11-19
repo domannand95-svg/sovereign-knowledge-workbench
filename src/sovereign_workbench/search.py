@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sqlite3
+import sys
+from urllib.parse import quote
 from pathlib import Path, PurePosixPath
 
 from .extract import extract_text_from_bytes
@@ -42,11 +45,21 @@ def connect_readonly(path: Path) -> sqlite3.Connection:
     """Open the review database without any write, schema or journal-mode change."""
     if not Path(path).is_file():
         raise ValueError("The review database does not exist; nothing has been admitted")
+    absolute = Path(path).absolute()  # not resolve(): keep mapped drive letters as given
+    location = absolute.as_posix()
+    uri = "file:" + ("/" if not location.startswith("/") else "") + quote(location, safe="/:")
     try:
-        database = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+        database = sqlite3.connect(f"{uri}?mode=ro", uri=True)
         tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    except sqlite3.Error as exc:
-        raise ValueError(f"The review database could not be opened read-only: {exc}") from exc
+    except sqlite3.Error:
+        # SQLite rejects some Windows network-share URIs; fall back to a plain connection
+        # that refuses every write.
+        try:
+            database = sqlite3.connect(absolute)
+            database.execute("PRAGMA query_only=ON")
+            tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        except sqlite3.Error as exc:
+            raise ValueError(f"The review database could not be opened read-only: {exc}") from exc
     if not REQUIRED_TABLES <= tables:
         database.close()
         raise ValueError("The review database has no archive review tables")
@@ -68,8 +81,10 @@ def _latest_decisions(database: sqlite3.Connection) -> dict[str, dict[str, str]]
 
 def _safe_relative(relative: str) -> bool:
     pure = PurePosixPath(relative)
-    return (bool(relative) and not pure.is_absolute() and "\\" not in relative
-            and all(part not in ("", ".", "..") and ":" not in part for part in pure.parts))
+    windows = os.name == "nt"  # ':' and '\\' are ordinary file-name characters elsewhere
+    return (bool(relative) and not pure.is_absolute() and not (windows and "\\" in relative)
+            and all(part not in ("", ".", "..") and not (windows and ":" in part)
+                    for part in pure.parts))
 
 
 def _has_link(root: Path, relative: str) -> bool:
@@ -118,9 +133,12 @@ def _lines(text: str) -> list[str]:
     return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
 
 
-def _snippet(line: str, start: int, length: int) -> str:
+def _snippet(line: str, needle: str) -> str:
     if len(line) <= MAX_LINE_CHARS:
         return line.strip()
+    # Locate the match in the original line (case-folding can change string length).
+    found = re.search(re.escape(needle), line, re.IGNORECASE)
+    start, length = (found.start(), found.end() - found.start()) if found else (0, len(needle))
     left = max(0, min(start - (MAX_LINE_CHARS - length) // 2, len(line) - MAX_LINE_CHARS))
     window = line[left:left + MAX_LINE_CHARS]
     return ("…" if left else "") + window + ("…" if left + MAX_LINE_CHARS < len(line) else "")
@@ -159,8 +177,9 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
         searched = False
         if status == VERIFIED:
             suffix = PurePosixPath(relative).suffix.casefold()
-            # Bytes are capped by max_file_bytes, so the whole verified text is searched.
-            text, _ = extract_text_from_bytes(data or b"", suffix, max_chars=len(data or b"") + 1)
+            # The whole verified text is searched. Memory is bounded by max_file_bytes and
+            # the extractors' own limits; compressed formats can hold more characters than bytes.
+            text, _ = extract_text_from_bytes(data or b"", suffix, max_chars=sys.maxsize)
             if text is None:
                 not_searchable.append({"source_id": source_id, "relative_path": relative,
                                        "intake_root": root, "status": NO_TEXT})
@@ -175,7 +194,7 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
                             capped = True
                             break
                         content_matches.append({"line": number,
-                                                "text": _snippet(line, at, len(needle))})
+                                                "text": _snippet(line, needle)})
         else:
             unverified.append({"source_id": source_id, "relative_path": relative,
                                "intake_root": root, "status": status})
