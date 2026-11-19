@@ -21,8 +21,8 @@ def _run(capsys, *argv):
 def archive(tmp_path, capsys):
     docs = tmp_path / "docs"
     docs.mkdir()
-    (docs / "log.txt").write_text("Grevillea cuttings rooted under mist.\n", encoding="utf-8")
-    (docs / "log-copy.txt").write_text("Grevillea cuttings rooted under mist.\n", encoding="utf-8")
+    (docs / "log.txt").write_bytes(b"Grevillea cuttings rooted under mist.\n")
+    (docs / "log-copy.txt").write_bytes(b"Grevillea cuttings rooted under mist.\n")
     db = tmp_path / "archive.db"
     _run(capsys, "archive-intake-register", str(docs), "--state-db", str(db),
          "--purpose", "synthetic", "--include", ".txt")
