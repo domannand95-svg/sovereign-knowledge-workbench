@@ -10,7 +10,7 @@ import pytest
 from sovereign_workbench.cli import main
 from sovereign_workbench.local_review_web import make_server
 from sovereign_workbench.review_batches import connect, counts, import_review_csv
-from sovereign_workbench.search import search_archive
+from sovereign_workbench.search import connect_readonly, search_archive
 
 
 def _run(capsys, *argv):
@@ -132,11 +132,12 @@ def test_status_is_derived_from_latest_decision(archive):
     with connect(db) as database:
         source_id, sha = database.execute(
             "SELECT source_id,source_sha256 FROM review_sources ORDER BY relative_path").fetchone()
-        for decision, note in (("APPROVE", "first"), ("QUARANTINE", "second thoughts")):
+        for decision, note, at in (("APPROVE", "first", "2026-11-19T10:00:00.500000Z"),
+                                   ("QUARANTINE", "second", "2026-11-19T10:00:01.000000Z")):
             database.execute(
                 "INSERT INTO archive_review_decisions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (note, source_id, batch_id, decision, "Other", "Research",
-                 "Non-authoritative candidate", "LOW", "", "", note, "", "", "", "R", "t"))
+                 "Non-authoritative candidate", "LOW", "", "", note, "", "", "", "R", at))
         database.commit()
         assert counts(database) == {"pending": 0, "batched": 1, "reviewed": 0,
                                     "quarantined": 1, "batches": 1}
@@ -188,3 +189,94 @@ def test_docx_is_searched_from_the_verified_bytes(tmp_path, capsys):
     _run(capsys, "archive-batch-create", str(docs), "--state-db", str(db), "--include", ".docx")
     [hit] = _run(capsys, "archive-search", "kangaroo", "--state-db", str(db))["results"]
     assert hit["content_matches"] == [{"line": 1, "text": "Field trial of kangaroo grass"}]
+
+
+def test_match_beyond_200k_characters_is_found(tmp_path, capsys):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "long.txt").write_text(("x" * 99 + "\n") * 2100 + "needle deep\n", encoding="utf-8")
+    db = tmp_path / "a.db"
+    _run(capsys, "archive-intake-register", str(docs), "--state-db", str(db),
+         "--purpose", "synthetic", "--include", ".txt")
+    _run(capsys, "archive-batch-create", str(docs), "--state-db", str(db), "--include", ".txt")
+    [hit] = _run(capsys, "archive-search", "needle", "--state-db", str(db))["results"]
+    assert hit["content_matches"] == [{"line": 2101, "text": "needle deep"}]
+
+
+def test_result_limit_never_hides_unverified_sources(tmp_path, capsys):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    for name in ("a.txt", "b.txt", "c.txt", "z_changed.txt"):
+        (docs / name).write_text("needle\n", encoding="utf-8")
+    db = tmp_path / "a.db"
+    _run(capsys, "archive-intake-register", str(docs), "--state-db", str(db),
+         "--purpose", "synthetic", "--include", ".txt")
+    _run(capsys, "archive-batch-create", str(docs), "--state-db", str(db), "--include", ".txt")
+    (docs / "z_changed.txt").write_text("tampered needle\n", encoding="utf-8")
+    found = _run(capsys, "archive-search", "needle", "--state-db", str(db), "--limit", "2")
+    assert len(found["results"]) == 2 and found["truncated"] is True
+    assert found["matching_sources"] == 4  # the changed file still matches on its summary
+    assert [(s["relative_path"], s["status"]) for s in found["unverified_sources"]] == [
+        ("z_changed.txt", "CHANGED_SINCE_INTAKE")]
+
+
+def test_search_does_not_change_the_database(archive, capsys):
+    import hashlib
+    import sqlite3
+    import gc
+    _, db, _ = archive
+    gc.collect()  # release connections left open by earlier CLI calls in this process
+    with sqlite3.connect(db) as database:
+        database.execute("PRAGMA journal_mode=DELETE")
+    database.close()
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    _run(capsys, "archive-search", "seedling", "--state-db", str(db))
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before
+    with connect_readonly(db) as database:
+        with pytest.raises(sqlite3.OperationalError):
+            database.execute("CREATE TABLE should_fail(x)")
+
+
+def test_snippet_line_numbers_and_bom(tmp_path, capsys):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.txt").write_bytes(
+        b"\xef\xbb\xbfneedle bom\r\nsecond\x0cthird needle\r\n" + b"y" * 400 + b" needle end\n")
+    (docs / "empty.txt").write_bytes(b"\xff\xfe not utf-8")
+    db = tmp_path / "a.db"
+    _run(capsys, "archive-intake-register", str(docs), "--state-db", str(db),
+         "--purpose", "synthetic", "--include", ".txt")
+    _run(capsys, "archive-batch-create", str(docs), "--state-db", str(db), "--include", ".txt")
+    found = _run(capsys, "archive-search", "needle", "--state-db", str(db))
+    [hit] = found["results"]
+    lines = [(m["line"], m["text"]) for m in hit["content_matches"]]
+    assert lines[0] == (1, "needle bom")
+    assert lines[1] == (2, "second\x0cthird needle")
+    assert lines[2][0] == 3 and "needle end" in lines[2][1] and lines[2][1].startswith("…")
+    assert found["unverified_sources"] == []
+    assert [(s["relative_path"], s["status"]) for s in found["not_searchable_sources"]] == [
+        ("empty.txt", "NO_SEARCHABLE_TEXT")]
+
+
+def test_duplicate_rows_for_one_source_are_rejected(archive, tmp_path, capsys):
+    _, db, batch_id = archive
+    exported = tmp_path / "review.csv"
+    _run(capsys, "archive-batch-export", batch_id, "--state-db", str(db), "--output", str(exported))
+    with exported.open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        fields, rows = reader.fieldnames, list(reader)
+    decided = []
+    for decision in ("APPROVE", "QUARANTINE"):
+        row = dict(rows[0])
+        row.update(decision=decision, topic="Other", maturity="Research",
+                   authority="Non-authoritative candidate", confidence="LOW",
+                   reviewer="R", review_note=decision)
+        decided.append(row)
+    edited = tmp_path / "dup.csv"
+    with edited.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(decided)
+    with connect(db) as database:
+        with pytest.raises(ValueError, match="already has a decision on row 2"):
+            import_review_csv(database, edited)

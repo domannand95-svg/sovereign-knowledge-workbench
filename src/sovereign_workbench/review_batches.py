@@ -427,7 +427,12 @@ REVIEW_COLUMNS = (
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    # Always include microseconds so stored timestamps sort correctly as text.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+# The ledger-wide rule for "latest decision", shared with the export and allocation gates.
+LATEST_DECISION_ORDER = "decided_at DESC,decision_id DESC"
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -672,7 +677,7 @@ def counts(database: sqlite3.Connection) -> dict[str, int]:
     result = {state: 0 for state in ("pending", "batched", "reviewed", "quarantined")}
     for state, latest, count in database.execute(
         "SELECT s.state,(SELECT d.decision FROM archive_review_decisions d "
-        "WHERE d.source_id=s.source_id ORDER BY d.rowid DESC LIMIT 1) AS latest,COUNT(*) "
+        f"WHERE d.source_id=s.source_id ORDER BY {LATEST_DECISION_ORDER} LIMIT 1) AS latest,COUNT(*) "
         "FROM review_sources s GROUP BY s.state,latest"
     ):
         if latest == "QUARANTINE":
@@ -1018,7 +1023,14 @@ def import_review_csv(database: sqlite3.Connection, path: Path) -> int:
                              + "; ".join(detail) + ")")
         rows = list(reader)
     problems = []
+    seen: dict[str, int] = {}
     for line, row in enumerate(rows, start=2):
+        source_id = row.get("source_id") or ""
+        if (row.get("decision") or "").strip():
+            if source_id in seen:
+                problems.append(f"row {line}: source {row.get('source_path') or source_id} already "
+                                f"has a decision on row {seen[source_id]}; one decision per source per import")
+            seen.setdefault(source_id, line)
         label = f"row {line} ({row.get('source_path') or row.get('source_id') or 'unknown source'})"
         try:
             _validate_review_source_identity(database, row)
