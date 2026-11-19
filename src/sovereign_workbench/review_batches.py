@@ -662,9 +662,24 @@ def commit_prepared_batch(
 
 
 def counts(database: sqlite3.Connection) -> dict[str, int]:
+    """Count sources by review progress.
+
+    Review progress is derived from the append-only decision ledger, not from a stored
+    flag that could drift from it: a batched source with a recorded human decision is
+    ``reviewed`` (or ``quarantined`` if its latest decision is QUARANTINE). Reviewed means
+    a decision exists; it does not mean the source is approved for export or disclosure.
+    """
     result = {state: 0 for state in ("pending", "batched", "reviewed", "quarantined")}
-    for state, count in database.execute("SELECT state,COUNT(*) FROM review_sources GROUP BY state"):
-        result[state] = count
+    for state, latest, count in database.execute(
+        "SELECT s.state,(SELECT d.decision FROM archive_review_decisions d "
+        "WHERE d.source_id=s.source_id ORDER BY d.rowid DESC LIMIT 1) AS latest,COUNT(*) "
+        "FROM review_sources s GROUP BY s.state,latest"
+    ):
+        if latest == "QUARANTINE":
+            state = "quarantined"
+        elif latest is not None:
+            state = "reviewed"
+        result[state] += count
     result["batches"] = database.execute("SELECT COUNT(*) FROM review_batches").fetchone()[0]
     return result
 
@@ -963,12 +978,61 @@ def relationship_counts(database: sqlite3.Connection) -> dict[str, int]:
     return result
 
 
+CONFIDENCES = ("HIGH", "MEDIUM", "LOW", "UNKNOWN")
+_CONTROLLED_FIELDS = (("decision", DECISIONS), ("topic", TOPICS), ("maturity", MATURITIES),
+                      ("authority", AUTHORITIES), ("confidence", set(CONFIDENCES)))
+
+
+def review_row_problems(row: dict[str, str]) -> list[str]:
+    """Return every content problem in one review row, each naming the field and the fix."""
+    problems = []
+    for field, allowed in _CONTROLLED_FIELDS:
+        if row.get(field, "") not in allowed:
+            problems.append(f"{field} {row.get(field, '')!r} is not one of: "
+                            + ", ".join(sorted(allowed)))
+    if not row.get("reviewer", "").strip():
+        problems.append("reviewer is required")
+    if not row.get("review_note", "").strip():
+        problems.append("review_note is required")
+    if row.get("decision") == "NEEDS_RESEARCH" and not row.get("research_question", "").strip():
+        problems.append("NEEDS_RESEARCH requires a research question")
+    return problems
+
+
 def import_review_csv(database: sqlite3.Connection, path: Path) -> int:
+    """Import all decided rows, or none. Every problem in the file is reported together."""
     with path.open(encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        if tuple(reader.fieldnames or ()) != REVIEW_COLUMNS:
-            raise ValueError("Review CSV columns do not match the frozen contract")
+        columns = tuple(reader.fieldnames or ())
+        if columns != REVIEW_COLUMNS:
+            missing = [name for name in REVIEW_COLUMNS if name not in columns]
+            extra = [name for name in columns if name not in REVIEW_COLUMNS]
+            detail = []
+            if missing:
+                detail.append("missing: " + ", ".join(missing))
+            if extra:
+                detail.append("unexpected: " + ", ".join(extra))
+            if not detail:
+                detail.append("columns are out of order")
+            raise ValueError("Review CSV columns do not match the frozen contract ("
+                             + "; ".join(detail) + ")")
         rows = list(reader)
+    problems = []
+    for line, row in enumerate(rows, start=2):
+        label = f"row {line} ({row.get('source_path') or row.get('source_id') or 'unknown source'})"
+        try:
+            _validate_review_source_identity(database, row)
+        except ValueError:
+            problems.append(f"{label}: source identity does not match the batch "
+                            "(batch_id, source_id or source_sha256 was changed)")
+        if None in row or any(value is None for value in row.values()):
+            problems.append(f"{label}: row has the wrong number of fields")
+            continue
+        if row["decision"].strip():
+            problems.extend(f"{label}: {problem}" for problem in review_row_problems(row))
+    if problems:
+        raise ValueError(f"Review CSV has {len(problems)} problem(s); nothing was imported:\n- "
+                         + "\n- ".join(problems))
     imported = 0
     database.execute("BEGIN IMMEDIATE")
     try:
