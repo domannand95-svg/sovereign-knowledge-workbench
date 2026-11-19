@@ -177,6 +177,28 @@ recovers interrupted jobs, rejects reuse of a task identity with changed
 content, and bounds task count, prompt bytes, response bytes, concurrency, and
 execution time.
 
+## Find admitted documents again
+
+```powershell
+.\.venv\Scripts\skw.exe archive-search "seedling survival" `
+  --state-db workbench-output\archive-review.db
+```
+
+Search is read-only and case-insensitive. Each admitted file is re-read from its
+original location and searched only if its bytes still match the SHA-256 recorded at
+intake; no copy of document text is kept for searching. Each result shows the file,
+matching lines, intake root, batch and the latest human review decision.
+
+Files that are missing, changed since intake, unreadable, too large or without
+extractable text are listed under `unverified_sources`, and their current contents are
+never shown as matches. They can still appear through recorded metadata (file name,
+review summary or review note), labelled in `metadata_matches`. A review decision is
+not permission to move, export or disclose a document.
+
+`archive-batch-status` derives `reviewed` and `quarantined` from the latest recorded
+human decision for each source. Review CSV imports are all-or-nothing and report every
+problem together, naming the row, field and accepted values.
+
 ## Authorization receipt verification
 
 Effectful boundaries require `sovereign.authorization.receipt.v3`. The
