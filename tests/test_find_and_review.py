@@ -280,3 +280,44 @@ def test_duplicate_rows_for_one_source_are_rejected(archive, tmp_path, capsys):
     with connect(db) as database:
         with pytest.raises(ValueError, match="already has a decision on row 2"):
             import_review_csv(database, edited)
+
+
+def test_docx_text_longer_than_the_file_is_fully_searched(tmp_path, capsys):
+    import zipfile
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    import random
+    words = random.Random(7).choices(["soil", "fungi", "trial", "root", "mist", "seed", "plot",
+                                      "grass", "water", "light", "cutting", "nursery"], k=40_000)
+    paragraphs = "".join(f"<w:p><w:r><w:t>{' '.join(words[i:i + 20])}</w:t></w:r></w:p>"
+                         for i in range(0, len(words), 20))
+    body = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            f"<w:body>{paragraphs}<w:p><w:r><w:t>needle at end</w:t></w:r></w:p></w:body></w:document>")
+    with zipfile.ZipFile(docs / "long.docx", "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", body)
+    size = (docs / "long.docx").stat().st_size
+    assert size < 200_000 < len(body) and len(body) / size < 200  # within the zip-bomb guard
+    db = tmp_path / "a.db"
+    _run(capsys, "archive-intake-register", str(docs), "--state-db", str(db),
+         "--purpose", "synthetic", "--include", ".docx")
+    _run(capsys, "archive-batch-create", str(docs), "--state-db", str(db), "--include", ".docx")
+    [hit] = _run(capsys, "archive-search", "needle", "--state-db", str(db))["results"]
+    assert hit["content_matches"] == [{"line": 2001, "text": "needle at end"}]
+
+
+def test_snippet_contains_match_after_length_changing_casefold():
+    from sovereign_workbench.search import _snippet
+    assert "needle" in _snippet("\u00df" * 400 + "needle" + "x" * 400, "needle")
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="':' is not valid in Windows file names")
+def test_colon_in_posix_file_name_is_searched(tmp_path, capsys):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "Meeting 10:30.txt").write_text("needle\n", encoding="utf-8")
+    db = tmp_path / "a.db"
+    _run(capsys, "archive-intake-register", str(docs), "--state-db", str(db),
+         "--purpose", "synthetic", "--include", ".txt")
+    _run(capsys, "archive-batch-create", str(docs), "--state-db", str(db), "--include", ".txt")
+    found = _run(capsys, "archive-search", "needle", "--state-db", str(db))
+    assert found["unverified_sources"] == [] and found["results"][0]["verification"] == "VERIFIED"
