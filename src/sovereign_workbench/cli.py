@@ -23,7 +23,7 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              relationship_counts, routing_counts)
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
-from .search import search_archive
+from .search import connect_readonly, search_archive
 from .review_batches import import_dataset_allocations, import_research_evidence_returns
 from .intake import scan_files
 from .analysis import classify, privacy_findings
@@ -448,12 +448,13 @@ def main(argv: list[str] | None = None) -> int:
                                   "relationship_counts": relationship_counts(database)}, sort_keys=True))
             return 0
         if args.command == "archive-search":
-            if not args.state_db.is_file():
-                raise ValueError("The review database does not exist; nothing has been admitted")
-            with connect_review_batches(args.state_db) as database:
-                print(json.dumps(search_archive(database, args.query, limit=args.limit,
-                                                max_file_bytes=args.max_file_mb * 1024 * 1024),
-                                 ensure_ascii=False, sort_keys=True))
+            database = connect_readonly(args.state_db)
+            try:
+                result = search_archive(database, args.query, limit=args.limit,
+                                        max_file_bytes=args.max_file_mb * 1024 * 1024)
+            finally:
+                database.close()
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
         if args.command == "archive-research-export":
             with connect_review_batches(args.state_db) as database:

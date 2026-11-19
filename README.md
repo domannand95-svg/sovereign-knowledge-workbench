@@ -189,15 +189,20 @@ original location and searched only if its bytes still match the SHA-256 recorde
 intake; no copy of document text is kept for searching. Each result shows the file,
 matching lines, intake root, batch and the latest human review decision.
 
-Files that are missing, changed since intake, unreadable, too large or without
-extractable text are listed under `unverified_sources`, and their current contents are
-never shown as matches. They can still appear through recorded metadata (file name,
-review summary or review note), labelled in `metadata_matches`. A review decision is
-not permission to move, export or disclose a document.
+Files that are missing, changed since intake, unreadable or too large are listed under
+`unverified_sources`; verified files with no extractable text are listed under
+`not_searchable_sources`. Both lists are always complete, even when `--limit` truncates
+the results, and the current contents of an unverified file are never shown. Such files
+can still appear through recorded metadata: `metadata_matches` names the fields (file
+name, generated summary, review note) that contain the search text without quoting
+them. A hash match shows the text is what was admitted, not that it is true; a review
+decision is not permission to move, export or disclose a document. The database is
+opened read-only.
 
 `archive-batch-status` derives `reviewed` and `quarantined` from the latest recorded
-human decision for each source. Review CSV imports are all-or-nothing and report every
-problem together, naming the row, field and accepted values.
+human decision for each source, using the same ordering as the export gates. Review CSV imports are all-or-nothing and report every
+problem together, naming the row, field and accepted values; a file may carry only one
+decision per source.
 
 ## Authorization receipt verification
 
