@@ -85,6 +85,8 @@ class ReviewController:
 
     def accept(self, item: ReviewItem, decision: str, *, note: str,
                research_question: str = "") -> int:
+        if not note.strip():
+            raise ValueError("Write a short review note in your own words before choosing a decision")
         root = Path(item.root).resolve(strict=True)
         source = (root / item.source_path).resolve(strict=True)
         if not source.is_relative_to(root):
@@ -152,7 +154,7 @@ class ReviewWindow:
         self.summary = self._text_box("Summary", 8)
         self.reason = self._text_box("Why it needs review", 4)
         self.question = self._text_box("Research question (editable)", 4, editable=True)
-        self.note = self._text_box("Your review note (editable)", 3, editable=True)
+        self.note = self._text_box("Your review note (required, in your own words)", 3, editable=True)
 
         buttons = tk.Frame(self.root, bg="#f4f7fb")
         buttons.pack(fill="x", padx=24, pady=18)
@@ -211,7 +213,7 @@ class ReviewWindow:
             reason = item.route_reasons
         self._set(self.reason, reason, editable=False)
         self._set(self.question, propose_research_question(item), editable=True)
-        self._set(self.note, "Human reviewed the candidate summary and routing reason.", editable=True)
+        self._set(self.note, "", editable=True)
 
     def choose(self, label: str) -> None:
         if self.index >= len(self.items):
