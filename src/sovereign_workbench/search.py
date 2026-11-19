@@ -266,16 +266,18 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
                                   "review_note")} if decision else None),
         })
 
-    # Group identical documents without hiding any of them: each result names the other
-    # admitted sources with the same intake hash, each with its own path and provenance.
-    by_hash: dict[str, list[dict[str, object]]] = {}
+    # Group identical documents without hiding any of them: each result names every other
+    # admitted source that had the same hash at import, with its own path and provenance,
+    # whether or not it is among the returned results. A copy may have changed since import;
+    # its own verification status is reported where it appears as a result.
+    by_hash: dict[str, list[tuple[str, str, str]]] = {}
+    for source_id, root, relative, sha256, _batch, _summary in rows:
+        by_hash.setdefault(sha256, []).append((source_id, relative, root))
     for result in results:
-        by_hash.setdefault(str(result["admitted_sha256"]), []).append(result)
-    for result in results:
-        result["identical_to"] = [
-            {"source_id": other["source_id"], "relative_path": other["relative_path"],
-             "intake_root": other["intake_root"]}
-            for other in by_hash[str(result["admitted_sha256"])] if other is not result]
+        result["identical_at_import"] = [
+            {"source_id": other_id, "relative_path": other_path, "intake_root": other_root}
+            for other_id, other_path, other_root in by_hash[str(result["admitted_sha256"])]
+            if other_id != result["source_id"]]
 
     return {
         "contract_version": CONTRACT_VERSION,

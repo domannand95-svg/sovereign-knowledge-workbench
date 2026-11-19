@@ -43,16 +43,16 @@ button{border:0;border-radius:10px;color:white;padding:18px 10px;font-size:1rem;
 <div class="choices"><button class="approve" data-choice="APPROVE">APPROVE</button><button class="research" data-choice="RESEARCH">RESEARCH</button><button class="quarantine" data-choice="QUARANTINE">QUARANTINE</button><button class="reject" data-choice="REJECT">REJECT</button></div>
 <div class="safety">This screen records review evidence only. It cannot move, delete, publish, stage, or train on files.</div></section></main>
 <script>
-const token=location.hash.slice(1);history.replaceState(null,"",location.pathname);let current=null;
+const token=location.hash.slice(1);history.replaceState(null,"",location.pathname);let current=null;let docReady=false;let saving=false;
 const el=id=>document.getElementById(id);const auth={"Authorization":"Bearer "+token};
 function error(message){if(message)el("saved").classList.add("hidden");el("error").textContent=message;el("error").classList.toggle("hidden",!message)}
 async function load(){error("");const response=await fetch("/api/next",{headers:auth,cache:"no-store"});if(!response.ok)throw new Error((await response.json()).error||"Review could not be loaded");const data=await response.json();current=data.item;
  if(!current){el("progress").textContent="Review complete";el("path").textContent="No review items remain in this database.";el("route").textContent="All recorded decisions remain non-authoritative.";["doc","docstatus","sha","summary","reasons"].forEach(x=>el(x).textContent="");document.querySelectorAll("button,textarea").forEach(x=>x.disabled=true);return}
  el("progress").textContent=`File 1 of ${data.remaining}`;el("path").textContent=current.source_path;el("route").textContent=current.route_label;el("sha").textContent=`Fingerprint (SHA-256) ${current.source_sha256.slice(0,16)}…`;el("summary").textContent=current.model_summary||"No summary is available.";el("reasons").textContent=current.display_reasons;el("question").value=current.research_question;el("note").value="";syncButtons();await loadDocument(current.source_id);
 }
-async function decide(choice){if(!current)return;document.querySelectorAll("button").forEach(x=>x.disabled=true);error("");try{const response=await fetch("/api/decision",{method:"POST",headers:{...auth,"Content-Type":"application/json"},body:JSON.stringify({source_id:current.source_id,decision:choice,note:el("note").value,research_question:el("question").value})});const data=await response.json();if(!response.ok)throw new Error(data.error||"Decision was blocked");const done=current.source_path;el("saved").textContent=`Saved: ${choice} for ${done}`;el("saved").classList.remove("hidden");await load()}catch(e){error(e.message)}finally{syncButtons()}}
-function syncButtons(){const ready=!!current&&el("note").value.trim().length>0;document.querySelectorAll("button[data-choice]").forEach(x=>{x.disabled=!ready;x.title=ready?"":"Write a review note first"})}
-async function loadDocument(id){el("doc").textContent="Loading…";el("docstatus").textContent="";const response=await fetch("/api/source?source_id="+encodeURIComponent(id),{headers:auth,cache:"no-store"});const data=await response.json();if(!response.ok){el("doc").textContent="";el("docstatus").textContent=data.error||"The document could not be loaded";el("docstatus").className="status bad";return}
+async function decide(choice){if(!current||saving||!docReady)return;saving=true;syncButtons();error("");try{const response=await fetch("/api/decision",{method:"POST",headers:{...auth,"Content-Type":"application/json"},body:JSON.stringify({source_id:current.source_id,decision:choice,note:el("note").value,research_question:el("question").value})});const data=await response.json();if(!response.ok)throw new Error(data.error||"Decision was blocked");const done=current.source_path;el("saved").textContent=`Saved: ${choice} for ${done}`;el("saved").classList.remove("hidden");saving=false;await load()}catch(e){error(e.message)}finally{saving=false;syncButtons()}}
+function syncButtons(){const ready=!!current&&docReady&&!saving&&el("note").value.trim().length>0;document.querySelectorAll("button[data-choice]").forEach(x=>{x.disabled=!ready;x.title=ready?"":(docReady?"Write a review note first":"Wait for the document to load")})}
+async function loadDocument(id){docReady=false;syncButtons();el("doc").textContent="Loading…";el("docstatus").textContent="";el("docstatus").className="status";const response=await fetch("/api/source?source_id="+encodeURIComponent(id),{headers:auth,cache:"no-store"});const data=await response.json();if(!current||current.source_id!==id)return;docReady=true;syncButtons();if(!response.ok){el("doc").textContent="";el("docstatus").textContent=data.error||"The document could not be loaded";el("docstatus").className="status bad";return}
  el("docstatus").textContent=data.verified?"Verified: unchanged since import"+(data.truncated?" (showing the beginning only)":""):data.status_message;el("docstatus").className="status "+(data.verified?"ok":"bad");el("doc").textContent=data.verified?data.text:"Not shown: only text that matches the imported file is displayed."}
 el("note").addEventListener("input",syncButtons);
 document.querySelectorAll("button[data-choice]").forEach(button=>button.addEventListener("click",()=>decide(button.dataset.choice)));load().catch(e=>error(e.message));
@@ -166,19 +166,19 @@ def make_server(state_db: Path, reviewer: str, token: str | None = None) -> tupl
             if len(source_ids) != 1:
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "Exactly one source_id is required"})
                 return
-            database = connect(database_path)
+            database, controller = self._controller()
             try:
-                row = database.execute(
-                    "SELECT s.root,s.relative_path,s.source_sha256 FROM review_sources s "
-                    "JOIN review_batch_items i ON i.source_id=s.source_id WHERE s.source_id=?",
-                    (source_ids[0],)).fetchone()
+                pending = controller.pending()
             finally:
                 database.close()
-            if not row:
-                self._json(HTTPStatus.NOT_FOUND, {"error": "Unknown review source"})
+            # Only the document currently under review is served.
+            if not pending or pending[0].source_id != source_ids[0]:
+                self._json(HTTPStatus.CONFLICT,
+                           {"error": "Only the document currently under review can be shown; reload the page"})
                 return
+            item = pending[0]
             # Shown only if the bytes read now still match the intake hash.
-            self._json(HTTPStatus.OK, read_verified_text(row[0], row[1], row[2]))
+            self._json(HTTPStatus.OK, read_verified_text(item.root, item.source_path, item.source_sha256))
 
         def do_POST(self) -> None:
             if urlparse(self.path).path != "/api/decision":
