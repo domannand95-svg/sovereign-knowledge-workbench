@@ -39,6 +39,23 @@ UNREADABLE = "UNREADABLE"
 NO_TEXT = "NO_SEARCHABLE_TEXT"
 
 METADATA_FIELDS = ("relative_path", "model_summary", "topic", "review_note", "research_question")
+METADATA_LABELS = {
+    "relative_path": "file name",
+    "model_summary": "Workbench-generated summary",
+    "topic": "your review topic",
+    "review_note": "your review note",
+    "research_question": "your research question",
+}
+STATUS_MESSAGES = {
+    VERIFIED: "Unchanged since import",
+    CHANGED: "This file has changed since it was imported; its current contents are not shown",
+    MISSING: "This file is no longer at its imported location",
+    NOT_REGULAR: "This path is no longer an ordinary file",
+    OUTSIDE_ROOT: "This path is outside the imported folder",
+    TOO_LARGE: "This file is too large to display",
+    UNREADABLE: "This file could not be read",
+    NO_TEXT: "This file has no readable text",
+}
 
 
 def connect_readonly(path: Path) -> sqlite3.Connection:
@@ -126,6 +143,25 @@ def _read_verified(root: str, relative: str, expected_sha256: str,
     if hashlib.sha256(data).hexdigest() != expected_sha256:
         return CHANGED, None
     return VERIFIED, data
+
+
+def read_verified_text(root: str, relative: str, expected_sha256: str, *,
+                       max_bytes: int = 20 * 1024 * 1024,
+                       max_chars: int = 500_000) -> dict[str, object]:
+    """Return a document's text only if its bytes still match the intake hash."""
+    status, data = _read_verified(root, relative, expected_sha256, max_bytes)
+    text = None
+    if status == VERIFIED:
+        text, _ = extract_text_from_bytes(data or b"", PurePosixPath(relative).suffix.casefold(),
+                                          max_chars=sys.maxsize)
+        if text is None:
+            status = NO_TEXT
+        elif text.startswith("\ufeff"):
+            text = text[1:]
+    truncated = text is not None and len(text) > max_chars
+    return {"status": status, "verified": status == VERIFIED,
+            "status_message": STATUS_MESSAGES[status],
+            "text": text[:max_chars] if text is not None else None, "truncated": truncated}
 
 
 def _lines(text: str) -> list[str]:
@@ -224,10 +260,22 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
             "content_matches": content_matches,
             "content_matches_capped": capped,
             "metadata_matches": metadata_matches,
+            "metadata_match_labels": [METADATA_LABELS[field] for field in metadata_matches],
             "latest_decision": ({key: decision[key] for key in
                                  ("decision", "topic", "maturity", "reviewer", "decided_at",
                                   "review_note")} if decision else None),
         })
+
+    # Group identical documents without hiding any of them: each result names the other
+    # admitted sources with the same intake hash, each with its own path and provenance.
+    by_hash: dict[str, list[dict[str, object]]] = {}
+    for result in results:
+        by_hash.setdefault(str(result["admitted_sha256"]), []).append(result)
+    for result in results:
+        result["identical_to"] = [
+            {"source_id": other["source_id"], "relative_path": other["relative_path"],
+             "intake_root": other["intake_root"]}
+            for other in by_hash[str(result["admitted_sha256"])] if other is not result]
 
     return {
         "contract_version": CONTRACT_VERSION,
