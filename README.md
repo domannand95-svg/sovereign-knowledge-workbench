@@ -162,6 +162,16 @@ The model sees bounded extracted text and returns classification JSON. It does
 not receive filesystem handles, policy keys, a capability registry, recipient
 credentials, or dispatch tools.
 
+Model endpoints must be a literal loopback address: `127.0.0.1` (or another
+`127.x.x.x`) or `[::1]`. Host names such as `localhost`, IPv4-mapped or scoped
+IPv6 forms, credentials in the URL and non-HTTP schemes are refused, both in
+`SKW_MODEL_ENDPOINT` and in scheduler worker configs; proxies and redirects are
+never used. `SKW_MODEL_TIMEOUT` must be a whole number of seconds from 1 to 600,
+and an invalid value stops the command before any document is processed. This
+restriction covers the Workbench's own model requests only: the URL path is
+sent as given, so a loopback service that forwards requests elsewhere is
+outside what this check can control.
+
 Several models can run through a deterministic, concurrency-bounded schedule:
 
 ```powershell
