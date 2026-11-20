@@ -404,13 +404,12 @@ def main(argv: list[str] | None = None) -> int:
                 # pending and are reported: they are never given another file's text.
                 current_ids = pending_source_ids(args.root, corpus_records)
                 if args.deduplicate_hash:
-                    # A stale pending source of this root can never be batched, so its hash
-                    # must not hide a current file (for example the same bytes, renamed).
-                    stale_ids = {item["source_id"] for item in
-                                 stale_pending_sources(database, args.root, current_ids)}
-                    admitted_hashes = {sha for source_id, sha in database.execute(
-                        "SELECT source_id,source_sha256 FROM review_sources"
-                    ).fetchall() if source_id not in stale_ids}
+                    # Only content that is batched, or pending here and still intact, counts as
+                    # already admitted. A pending source that may never be batched (stale, or
+                    # in another root that cannot be checked from here) must not hide a file.
+                    admitted_hashes = {sha for source_id, sha, state in database.execute(
+                        "SELECT source_id,source_sha256,state FROM review_sources"
+                    ).fetchall() if state != "pending" or source_id in current_ids}
                     records = _deduplicate_records(records, admitted_hashes, args.limit)
                 admitted = admit_review_sources(database, args.root, records)
                 prepared = prepare_review_batch(database, limit=args.limit, root=args.root,

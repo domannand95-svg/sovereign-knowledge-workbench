@@ -113,3 +113,18 @@ def test_deduplication_does_not_hide_a_renamed_pending_file(docs, capsys):
     outcome, _ = _create(capsys, root, db, "--deduplicate-hash")
     assert [item["relative_path"] for item in outcome["stale_pending"]] == ["gone.txt"]
     assert any(key.startswith("moved.txt@") for key in _summaries(db))
+
+
+def test_deduplication_ignores_another_roots_pending_sources(tmp_path, capsys):
+    # Found in review: root one's interrupted, since-deleted source hid root two's copy.
+    one, two = tmp_path / "one", tmp_path / "two"
+    for root in (one, two):
+        root.mkdir()
+        (root / "x.txt").write_text("shared bytes", encoding="utf-8")
+    db = tmp_path / "a.db"
+    _register(capsys, one, db)
+    _register(capsys, two, db)
+    _admit_only(one, db)
+    (one / "x.txt").unlink()
+    outcome, _ = _create(capsys, two, db, "--deduplicate-hash")
+    assert outcome["admitted"] == 1 and outcome["candidates"] == 1
