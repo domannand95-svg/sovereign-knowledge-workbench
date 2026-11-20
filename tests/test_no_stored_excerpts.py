@@ -100,6 +100,11 @@ def test_scan_report_contains_no_document_text(imported, capsys, tmp_path):
     assert MARKER not in captured.out
     written = [path for path in output.rglob("*") if path.is_file()] if output.exists() else []
     assert not any(MARKER.encode() in path.read_bytes() for path in written)
+    from sovereign_workbench.analysis import research_gaps
+    gaps = research_gaps(FileRecord("notes.md", "0" * 64, 1, "text/markdown", 0,
+                                    extracted_text=f"Further research needed: {MARKER}",
+                                    extraction_status="extracted"))
+    assert gaps and all(MARKER not in gap["question"] for gap in gaps)
     assert classify(FileRecord("a.txt", "0" * 64, 1, "text/plain", 0, extracted_text=MARKER,
                                extraction_status="extracted")).summary == NOT_STORED_SUMMARY
 
@@ -207,5 +212,6 @@ def test_status_reports_whether_a_database_holds_document_text(imported, legacy,
     assert status["stored_document_text"] == {
         "contains_document_text": True,
         "rows": {"candidate_summaries": 1, "family_claims": 0, "family_claim_excerpts": 0,
-                 "section_excerpts": 0}}
+                 "section_excerpts": 0, "family_research_tickets": 0,
+                 "section_research_tickets": 0}}
     assert MARKER not in json.dumps(status, ensure_ascii=False)  # counted, never shown

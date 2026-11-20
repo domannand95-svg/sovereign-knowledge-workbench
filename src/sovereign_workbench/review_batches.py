@@ -619,6 +619,10 @@ def stored_text_inventory(database: sqlite3.Connection) -> dict[str, object]:
             "SELECT COUNT(*) FROM archive_family_claim_coverage").fetchone()[0],
         "section_excerpts": database.execute(
             "SELECT COUNT(*) FROM archive_document_sections").fetchone()[0],
+        "family_research_tickets": database.execute(
+            "SELECT COUNT(*) FROM archive_family_research_tickets").fetchone()[0],
+        "section_research_tickets": database.execute(
+            "SELECT COUNT(*) FROM archive_section_research_tickets").fetchone()[0],
     }
     return {"contains_document_text": any(rows.values()), "rows": rows}
 

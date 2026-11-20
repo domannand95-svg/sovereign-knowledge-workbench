@@ -78,11 +78,14 @@ def research_gaps(record: FileRecord) -> list[dict[str, str]]:
     text = record.extracted_text or ""
     queue = []
     for line_number, line in enumerate(text.splitlines(), start=1):
-        if any(cue in line.casefold() for cue in RESEARCH_CUES):
+        cues = [cue for cue in RESEARCH_CUES if cue in line.casefold()]
+        if cues:
+            # Name the cue and the line, never the line itself: reports are written to disk.
             queue.append({
                 "source_path": record.relative_path,
                 "location": f"line:{line_number}",
-                "question": line.strip()[:500],
+                "question": (f"Line {line_number} contains the research cue \"{cues[0].strip()}\"; "
+                             "read it in the verified file."),
                 "status": "needs_review",
             })
     return queue
