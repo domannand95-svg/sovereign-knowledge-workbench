@@ -107,7 +107,10 @@ For a simpler one-file-at-a-time Windows review screen:
 
 The screen shows the bounded summary and deterministic review reason, then
 offers large **APPROVE**, **RESEARCH**, **QUARANTINE**, and **REJECT** choices.
-It re-hashes the exact source immediately before accepting a decision,
+A file that has moved or changed since import cannot be decided; **Skip for now**
+moves past it without recording anything, and skipped files return the next time
+the screen is opened. A file that still matches its import but has no readable
+text can be decided after checking the file itself. It re-hashes the exact source immediately before accepting a decision,
 automatically records the named human reviewer, and proposes an editable
 research question when needed. It has no file movement, deletion, staging,
 publication, dispatch, canonical-promotion, or training capability.
@@ -166,11 +169,18 @@ Model endpoints must be a literal loopback address: `127.0.0.1` (or another
 `127.x.x.x`) or `[::1]`. Host names such as `localhost`, IPv4-mapped or scoped
 IPv6 forms, credentials in the URL and non-HTTP schemes are refused, both in
 `SKW_MODEL_ENDPOINT` and in scheduler worker configs; proxies and redirects are
-never used. `SKW_MODEL_TIMEOUT` must be a whole number of seconds from 1 to 600,
-and an invalid value stops the command before any document is processed. This
-restriction covers the Workbench's own model requests only: the URL path is
+never used. `SKW_MODEL_TIMEOUT` must be a whole number of seconds from 1 to 600.
+This restriction covers the Workbench's own model requests only: the URL path is
 sent as given, so a loopback service that forwards requests elsewhere is
 outside what this check can control.
+
+With `--local-model`, the settings are checked before any document is processed:
+a non-loopback endpoint, a missing `SKW_MODEL_NAME`, `SKW_MODEL_MAX_CHARS` outside
+1000–20000 or an invalid timeout stops the command. A correctly configured model
+that is unavailable or replies badly does not stop it: those documents use the
+deterministic classifier, each is marked in its `proposal_reason`, and
+`archive-batch-create` reports the count as `model_failures` and on stderr.
+Without `--local-model`, the model settings are not read.
 
 Several models can run through a deterministic, concurrency-bounded schedule:
 

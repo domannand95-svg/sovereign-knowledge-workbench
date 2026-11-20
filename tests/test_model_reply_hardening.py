@@ -49,6 +49,7 @@ def test_batch_create_falls_back_when_the_model_reply_is_malformed(server_factor
     server = server_factory(_reply(200, DEEP))
     monkeypatch.setenv("SKW_MODEL_ENDPOINT", f"http://127.0.0.1:{server.port}/v1")
     monkeypatch.setenv("SKW_MODEL_TIMEOUT", "5")
+    monkeypatch.setenv("SKW_MODEL_NAME", "m")  # a missing name is now a configuration error
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "a.txt").write_bytes(b"Grevillea cuttings rooted under mist.\n")

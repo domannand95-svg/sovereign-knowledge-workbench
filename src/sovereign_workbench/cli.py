@@ -20,7 +20,9 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              counts as review_batch_counts, commit_prepared_batch as commit_prepared_review_batch,
                              prepare_next as prepare_review_batch,
                              export_review_csv, export_review_xlsx, import_review_csv,
-                             relationship_counts, routing_counts)
+                             relationship_counts, routing_counts,
+                             open_import_exclusions, record_import_exclusions)
+from .review_batches import _check_limit as check_batch_limit
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
 from .search import connect_readonly, search_archive
@@ -29,7 +31,7 @@ from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
 from .taxonomy import load_taxonomy
-from .local_model import LocalModelConfig, ModelError, check_limits, classify_with_local_model
+from .local_model import ModelError, checked_config_from_environment, classify_with_local_model
 from .relationships import detect_relationships
 from .family_review import (build_family_proposals, decide_boundary, family_report,
                             generate_research_tickets, import_evidence_return,
@@ -273,7 +275,23 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def _use_utf8_output() -> None:
+    """Write UTF-8 whatever the console code page, so document text never breaks output.
+
+    Redirected output on Windows otherwise uses the ANSI code page (often cp1252), which
+    cannot encode many characters found in documents and mangles the rest.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _use_utf8_output()
     args = parser().parse_args(argv)
     try:
         if args.command == "plugin-list":
@@ -368,6 +386,10 @@ def main(argv: list[str] | None = None) -> int:
                                  sort_keys=True))
             return 0
         if args.command == "archive-batch-create":
+            # Check everything that could fail the command before scanning the archive.
+            check_batch_limit(args.limit)
+            taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
+            local_model_config = checked_config_from_environment() if args.local_model else None
             suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}
             corpus_records = scan_files(args.root, max_file_bytes=args.max_file_mb * 1024 * 1024,
                                         include_suffixes=suffixes)
@@ -375,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.selection_manifest:
                 records = _select_manifest_records(args.root, records, args.selection_manifest)
             with connect_review_batches(args.state_db) as database:
+                considered = records  # what this import looked at, before de-duplication
                 if args.deduplicate_hash:
                     admitted_hashes = {row[0] for row in database.execute(
                         "SELECT DISTINCT source_sha256 FROM review_sources"
@@ -386,14 +409,8 @@ def main(argv: list[str] | None = None) -> int:
                 candidate_count = 0
                 relationship_count = 0
                 model_failures = 0
+                model_attempts = 0
                 if prepared:
-                    taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
-                    local_model_config = LocalModelConfig.from_environment() if args.local_model else None
-                    if local_model_config:
-                        try:  # refuse a misconfigured timeout up front instead of failing every record
-                            check_limits(local_model_config.timeout_seconds)
-                        except ModelError as exc:
-                            raise ValueError(f"SKW_MODEL_TIMEOUT is invalid: {exc}") from None
                     by_path = {record.relative_path: record for record in records}
                     candidates = []
                     for item in prepared:
@@ -401,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
                         classification = classify(record, taxonomy)
                         provenance = classification.source
                         if local_model_config and record.extracted_text:
+                            model_attempts += 1
                             try:
                                 classification = classify_with_local_model(
                                     record, local_model_config,
@@ -430,11 +448,27 @@ def main(argv: list[str] | None = None) -> int:
                     relationships = detect_relationships(selected_records, corpus_records)
                     batch, candidate_count, relationship_count = commit_prepared_review_batch(
                         database, prepared, candidates, relationships, limit=args.limit)
+                # Recorded only once the import has passed its checks and committed.
+                excluded = record_import_exclusions(database, args.root, considered,
+                                                    args.max_file_mb * 1024 * 1024)
                 print(json.dumps({"admitted": admitted, "candidates": candidate_count,
+                    "excluded": excluded,
                     "relationships": relationship_count, "model_failures": model_failures,
                     "batch": batch, "status": review_batch_counts(database),
                     "routing": routing_counts(database),
                     "relationship_counts": relationship_counts(database)}, sort_keys=True))
+                if excluded:
+                    shown = ", ".join(item["relative_path"] for item in excluded[:5])
+                    more = f" and {len(excluded) - 5} more" if len(excluded) > 5 else ""
+                    print(f"warning: {len(excluded)} file{'s were' if len(excluded) != 1 else ' was'} "
+                          f"not imported because {'they are' if len(excluded) != 1 else 'it is'} larger "
+                          f"than --max-file-mb {args.max_file_mb}: {shown}{more}. They are listed under "
+                          "'excluded' here and in archive-batch-status; re-run with a larger "
+                          "--max-file-mb to import them.", file=sys.stderr)
+                if model_failures:
+                    print(f"warning: the local model was unavailable for {model_failures} of "
+                          f"{model_attempts} documents; the deterministic classifier was used for "
+                          "those and each is marked in its proposal_reason", file=sys.stderr)
             return 0
         if args.command == "archive-batch-export":
             with connect_review_batches(args.state_db) as database:
@@ -449,6 +483,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "archive-batch-status":
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps({"status": review_batch_counts(database),
+                                  "excluded": open_import_exclusions(database),
                                   "routing": routing_counts(database),
                                   "relationship_counts": relationship_counts(database)}, sort_keys=True))
             return 0

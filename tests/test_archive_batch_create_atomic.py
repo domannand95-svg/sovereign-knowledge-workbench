@@ -44,7 +44,13 @@ def _nothing_written(state: Path, pending: int) -> None:
 def test_model_failure_falls_back_and_completes_the_batch(tmp_path, capsys, monkeypatch):
     args, state = _setup(tmp_path, capsys)
     monkeypatch.setenv("SKW_MODEL_NAME", "m")
-    monkeypatch.setenv("SKW_MODEL_ENDPOINT", "http://example.com/v1")  # refused before any send
+    # A valid loopback endpoint with nothing listening: the model is unavailable, not misconfigured.
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    monkeypatch.setenv("SKW_MODEL_ENDPOINT", f"http://127.0.0.1:{closed_port}/v1")
+    monkeypatch.setenv("SKW_MODEL_TIMEOUT", "5")
     assert main([*args, "--local-model"]) == 0
     outcome = json.loads(capsys.readouterr().out)
     assert outcome["model_failures"] == 4 and outcome["candidates"] == 4 and outcome["batch"]

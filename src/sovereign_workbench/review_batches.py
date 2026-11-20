@@ -36,6 +36,17 @@ CREATE TABLE IF NOT EXISTS review_sources (
 );
 CREATE INDEX IF NOT EXISTS review_sources_state_idx
   ON review_sources(state, root, relative_path, source_id);
+-- Files seen during an import but not admitted (never batched, never reviewed).
+CREATE TABLE IF NOT EXISTS archive_import_exclusions (
+  exclusion_id TEXT PRIMARY KEY,
+  root TEXT NOT NULL,
+  relative_path TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  modified_ns INTEGER NOT NULL,
+  reason TEXT NOT NULL CHECK(reason IN ('OVER_SIZE_LIMIT')),
+  limit_bytes INTEGER NOT NULL,
+  observed_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS review_batches (
   batch_id TEXT PRIMARY KEY,
   sequence INTEGER NOT NULL UNIQUE,
@@ -67,6 +78,10 @@ CREATE TABLE IF NOT EXISTS archive_review_decisions (
   reviewer TEXT NOT NULL,
   decided_at TEXT NOT NULL
 );
+-- Lookup only: the review queue and status counts find each source's decisions by
+-- (source_id, batch_id). Ordering of decisions is still set explicitly by each query.
+CREATE INDEX IF NOT EXISTS archive_review_decisions_source_batch_idx
+  ON archive_review_decisions(source_id, batch_id);
 CREATE TABLE IF NOT EXISTS archive_review_candidates (
   source_id TEXT PRIMARY KEY REFERENCES review_sources(source_id),
   batch_id TEXT NOT NULL REFERENCES review_batches(batch_id),
@@ -356,6 +371,10 @@ CREATE TRIGGER IF NOT EXISTS archive_review_relationships_no_update
   BEFORE UPDATE ON archive_review_relationships BEGIN SELECT RAISE(ABORT, 'archive review relationships are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_review_relationships_no_delete
   BEFORE DELETE ON archive_review_relationships BEGIN SELECT RAISE(ABORT, 'archive review relationships are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_import_exclusions_no_update
+  BEFORE UPDATE ON archive_import_exclusions BEGIN SELECT RAISE(ABORT, 'archive import exclusions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS archive_import_exclusions_no_delete
+  BEFORE DELETE ON archive_import_exclusions BEGIN SELECT RAISE(ABORT, 'archive import exclusions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_intake_roots_no_update
   BEFORE UPDATE ON archive_intake_roots BEGIN SELECT RAISE(ABORT, 'archive intake roots are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS archive_intake_roots_no_delete
@@ -546,6 +565,51 @@ def admit(database: sqlite3.Connection, root: Path, records: list[FileRecord]) -
         admitted += cursor.rowcount
     database.commit()
     return admitted
+
+
+def record_import_exclusions(database: sqlite3.Connection, root: Path, records: list[FileRecord],
+                             limit_bytes: int) -> list[dict[str, object]]:
+    """Durably record files this import left out, and return them.
+
+    Today the only reason is the size limit (`scan_files` records such files without a
+    hash). An exclusion is a record, not a decision: the file is never batched or reviewed.
+    """
+    canonical_root = str(root.resolve(strict=True))
+    excluded = []
+    for record in records:
+        if record.sha256 or record.extraction_status != "skipped_size_limit":
+            continue
+        values = (canonical_root, record.relative_path, record.size_bytes, record.modified_ns,
+                  "OVER_SIZE_LIMIT", limit_bytes)
+        exclusion_id = hashlib.sha256(json.dumps(values).encode("utf-8")).hexdigest()
+        database.execute(
+            "INSERT OR IGNORE INTO archive_import_exclusions(exclusion_id,root,relative_path,size_bytes,"
+            "modified_ns,reason,limit_bytes,observed_at) VALUES(?,?,?,?,?,?,?,?)",
+            (exclusion_id, *values, _now()))
+        excluded.append({"relative_path": record.relative_path, "reason": "OVER_SIZE_LIMIT",
+                         "size_bytes": record.size_bytes, "limit_bytes": limit_bytes})
+    database.commit()
+    return excluded
+
+
+def open_import_exclusions(database: sqlite3.Connection, *, limit: int = 100) -> dict[str, object]:
+    """Each path's latest exclusion, unless a version of that path was admitted after it.
+
+    An admission from before the exclusion does not clear it: the excluded file may be a
+    newer version that was never imported.
+    """
+    latest: dict[tuple[str, str], tuple] = {}
+    for row in database.execute(
+        "SELECT e.root,e.relative_path,e.size_bytes,e.reason,e.limit_bytes,e.observed_at "
+        "FROM archive_import_exclusions e "
+        "ORDER BY e.root,e.relative_path,e.observed_at DESC,e.exclusion_id DESC"
+    ):
+        latest.setdefault((row[0], row[1]), row)
+    rows = [row for (root, relative), row in latest.items() if not database.execute(
+        "SELECT 1 FROM review_sources WHERE root=? AND relative_path=? AND admitted_at>?",
+        (root, relative, row[5])).fetchone()]
+    keys = ("intake_root", "relative_path", "size_bytes", "reason", "limit_bytes", "observed_at")
+    return {"count": len(rows), "files": [dict(zip(keys, row)) for row in rows[:limit]]}
 
 
 class BatchLockTimeoutError(ValueError):
