@@ -6,7 +6,7 @@ from pathlib import Path
 from .analysis import classify, privacy_findings, research_gaps
 from .epistemic import assess
 from .intake import duplicate_groups, scan_files
-from .local_model import LocalModelConfig, ModelError, classify_with_local_model
+from .local_model import ModelError, checked_config_from_environment, classify_with_local_model
 from .model import ActionProposal, Finding, WorkbenchReport
 from .routing import load_routes, route_candidate
 from .taxonomy import load_taxonomy
@@ -23,6 +23,9 @@ def analyze_workspace(
     taxonomy_path: Path | None = None,
 ) -> WorkbenchReport:
     taxonomy = load_taxonomy(taxonomy_path) if taxonomy_path else None
+    # Model settings are read only when the model is requested, and refused before any
+    # document is processed if they are invalid.
+    model_config = checked_config_from_environment() if use_local_model else None
     records = scan_files(
         root,
         max_file_bytes=max_file_bytes,
@@ -39,12 +42,11 @@ def analyze_workspace(
         duplicate_groups=duplicate_groups(records),
     )
     routes = load_routes(routes_path)
-    model_config = LocalModelConfig.from_environment()
 
     duplicate_paths = {path for group in report.duplicate_groups for path in group[1:]}
     for record in records:
         classification = classify(record, taxonomy)
-        if use_local_model and record.extracted_text:
+        if model_config and record.extracted_text:
             try:
                 allowed_modules = [*taxonomy.modules, taxonomy.fallback_module] if taxonomy else None
                 classification = classify_with_local_model(

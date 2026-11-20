@@ -158,6 +158,41 @@ class LocalModelConfig:
         )
 
 
+def check_config(config: LocalModelConfig) -> None:
+    """Refuse settings under which the requested model could never be used.
+
+    A configuration problem is the operator's to fix, so it stops the command before any
+    document is processed. Only a correctly configured model that is unavailable at run
+    time falls back to the deterministic classifier.
+    """
+    try:
+        check_limits(config.timeout_seconds)
+    except ModelError as exc:
+        raise ModelError(f"SKW_MODEL_TIMEOUT is invalid: {exc}") from None
+    if not 1_000 <= config.max_content_chars <= 20_000:
+        raise ModelError("SKW_MODEL_MAX_CHARS must be between 1000 and 20000 characters")
+    try:
+        validate_endpoint(config.endpoint)
+    except ModelError as exc:
+        raise ModelError(f"SKW_MODEL_ENDPOINT is invalid: {exc}") from None
+    if not config.model.strip():
+        raise ModelError("SKW_MODEL_NAME is required when the local model is enabled")
+
+
+def checked_config_from_environment() -> LocalModelConfig:
+    """Read the local model settings and refuse any that are invalid (raises ValueError)."""
+    try:
+        for name in ("SKW_MODEL_TIMEOUT", "SKW_MODEL_MAX_CHARS"):
+            value = os.environ.get(name)
+            if value is not None and not value.strip().isdigit():
+                raise ModelError(f"{name} is invalid: it must be a whole number")
+        config = LocalModelConfig.from_environment()
+        check_config(config)
+    except ModelError as exc:
+        raise ValueError(f"Local model configuration is invalid: {exc}") from None
+    return config
+
+
 def classify_with_local_model(
     record: FileRecord,
     config: LocalModelConfig,

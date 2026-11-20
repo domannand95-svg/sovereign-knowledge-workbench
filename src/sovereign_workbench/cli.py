@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -31,7 +30,7 @@ from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
 from .taxonomy import load_taxonomy
-from .local_model import LocalModelConfig, ModelError, check_limits, classify_with_local_model
+from .local_model import ModelError, checked_config_from_environment, classify_with_local_model
 from .relationships import detect_relationships
 from .family_review import (build_family_proposals, decide_boundary, family_report,
                             generate_research_tickets, import_evidence_return,
@@ -290,23 +289,6 @@ def _use_utf8_output() -> None:
                 pass
 
 
-def _batch_model_config() -> LocalModelConfig:
-    """Read the local model settings, refusing values that would fail the whole command."""
-    try:
-        config = LocalModelConfig.from_environment()
-    except ValueError:
-        for name in ("SKW_MODEL_TIMEOUT", "SKW_MODEL_MAX_CHARS"):
-            value = os.environ.get(name)
-            if value is not None and not value.strip().lstrip("-").isdigit():
-                raise ValueError(f"{name} is invalid: it must be a whole number") from None
-        raise
-    try:  # refuse a misconfigured timeout up front instead of failing every record
-        check_limits(config.timeout_seconds)
-    except ModelError as exc:
-        raise ValueError(f"SKW_MODEL_TIMEOUT is invalid: {exc}") from None
-    return config
-
-
 def main(argv: list[str] | None = None) -> int:
     _use_utf8_output()
     args = parser().parse_args(argv)
@@ -406,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             # Check everything that could fail the command before scanning the archive.
             check_batch_limit(args.limit)
             taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
-            local_model_config = _batch_model_config() if args.local_model else None
+            local_model_config = checked_config_from_environment() if args.local_model else None
             suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}
             corpus_records = scan_files(args.root, max_file_bytes=args.max_file_mb * 1024 * 1024,
                                         include_suffixes=suffixes)
@@ -425,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
                 candidate_count = 0
                 relationship_count = 0
                 model_failures = 0
+                model_attempts = 0
                 if prepared:
                     by_path = {record.relative_path: record for record in records}
                     candidates = []
@@ -433,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
                         classification = classify(record, taxonomy)
                         provenance = classification.source
                         if local_model_config and record.extracted_text:
+                            model_attempts += 1
                             try:
                                 classification = classify_with_local_model(
                                     record, local_model_config,
@@ -467,6 +451,10 @@ def main(argv: list[str] | None = None) -> int:
                     "batch": batch, "status": review_batch_counts(database),
                     "routing": routing_counts(database),
                     "relationship_counts": relationship_counts(database)}, sort_keys=True))
+                if model_failures:
+                    print(f"warning: the local model was unavailable for {model_failures} of "
+                          f"{model_attempts} documents; the deterministic classifier was used for "
+                          "those and each is marked in its proposal_reason", file=sys.stderr)
             return 0
         if args.command == "archive-batch-export":
             with connect_review_batches(args.state_db) as database:

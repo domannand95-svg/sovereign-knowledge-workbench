@@ -73,7 +73,9 @@ def test_report_records_taxonomy_provenance(tmp_path: Path):
     assert all(proposal.status == "proposed" for proposal in report.proposals)
 
 
-def test_private_taxonomy_bounds_local_model_modules(tmp_path: Path):
+def test_private_taxonomy_bounds_local_model_modules(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SKW_MODEL_NAME", "m")  # a missing name is now a configuration error
+    monkeypatch.delenv("SKW_MODEL_ENDPOINT", raising=False)
     source = tmp_path / "source"
     source.mkdir()
     (source / "sample.txt").write_text("reactor", encoding="utf-8")
