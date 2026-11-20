@@ -665,7 +665,7 @@ def pending_source_ids(root: Path, records: list[FileRecord]) -> frozenset[str]:
 def stale_pending(database: sqlite3.Connection, root: Path,
                   current: frozenset[str]) -> list[dict[str, object]]:
     """Pending sources of this root whose admitted bytes are no longer at their path."""
-    return [{"relative_path": row[2], "source_sha256": row[3]}
+    return [{"source_id": row[0], "relative_path": row[2], "source_sha256": row[3]}
             for row in database.execute(_PENDING_ITEMS_FOR_ROOT_SQL, (_root_key(root),)).fetchall()
             if row[0] not in current]
 

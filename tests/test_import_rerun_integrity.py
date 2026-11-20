@@ -102,3 +102,14 @@ def test_rerun_with_deduplication_still_batches_already_admitted_files(docs, cap
     _admit_only(root, db)
     outcome, _ = _create(capsys, root, db, "--deduplicate-hash")
     assert outcome["candidates"] == 3 and outcome["stale_pending"] == []
+
+
+def test_deduplication_does_not_hide_a_renamed_pending_file(docs, capsys):
+    # Found in review of the fix: the stale pending source's hash hid the renamed file,
+    # so `moved.txt` was never admitted and nothing named it.
+    root, db = docs
+    _admit_only(root, db)
+    (root / "gone.txt").rename(root / "moved.txt")
+    outcome, _ = _create(capsys, root, db, "--deduplicate-hash")
+    assert [item["relative_path"] for item in outcome["stale_pending"]] == ["gone.txt"]
+    assert any(key.startswith("moved.txt@") for key in _summaries(db))

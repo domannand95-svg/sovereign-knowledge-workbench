@@ -399,16 +399,20 @@ def main(argv: list[str] | None = None) -> int:
                 records = _select_manifest_records(args.root, records, args.selection_manifest)
             with connect_review_batches(args.state_db) as database:
                 considered = records  # what this import looked at, before de-duplication
-                if args.deduplicate_hash:
-                    admitted_hashes = {row[0] for row in database.execute(
-                        "SELECT DISTINCT source_sha256 FROM review_sources"
-                    ).fetchall()}
-                    records = _deduplicate_records(records, admitted_hashes, args.limit)
-                admitted = admit_review_sources(database, args.root, records)
                 # Batch only this root's pending sources whose file still holds the admitted
                 # bytes. Others (left by an interrupted import, then changed or removed) stay
                 # pending and are reported: they are never given another file's text.
                 current_ids = pending_source_ids(args.root, corpus_records)
+                if args.deduplicate_hash:
+                    # A stale pending source of this root can never be batched, so its hash
+                    # must not hide a current file (for example the same bytes, renamed).
+                    stale_ids = {item["source_id"] for item in
+                                 stale_pending_sources(database, args.root, current_ids)}
+                    admitted_hashes = {sha for source_id, sha in database.execute(
+                        "SELECT source_id,source_sha256 FROM review_sources"
+                    ).fetchall() if source_id not in stale_ids}
+                    records = _deduplicate_records(records, admitted_hashes, args.limit)
+                admitted = admit_review_sources(database, args.root, records)
                 prepared = prepare_review_batch(database, limit=args.limit, root=args.root,
                                                 source_ids=current_ids)
                 stale = stale_pending_sources(database, args.root, current_ids)
