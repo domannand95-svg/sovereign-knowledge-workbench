@@ -10,7 +10,19 @@ DECISIONS = {"approved", "rejected", "needs_research", "quarantined"}
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    # Always include microseconds so stored timestamps sort correctly as text.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+# The current decision is the end of the candidate's hash chain: the one no later decision
+# names as its predecessor. Timestamps can tie (coarse clocks), so they only break ties
+# between chain ends, which a valid ledger never has.
+_LATEST_DECISION = (
+    "SELECT decision_id FROM review_decisions d WHERE d.candidate_id={candidate} "
+    "AND NOT EXISTS (SELECT 1 FROM review_decisions n WHERE n.candidate_id=d.candidate_id "
+    "AND n.previous_decision_id=d.decision_id) "
+    "ORDER BY d.decided_at DESC,d.decision_id DESC LIMIT 1"
+)
 
 
 def install(database: sqlite3.Connection) -> None:
@@ -79,13 +91,12 @@ def list_candidates(database: sqlite3.Connection, *, limit: int = 100) -> list[d
     if limit < 1 or limit > 1000:
         raise ValueError("Review query limit must be between 1 and 1000")
     install(database)
-    rows = database.execute("""
+    rows = database.execute(f"""
       SELECT c.candidate_id,c.job_id,j.plugin_id,j.source_path,c.result_sha256,c.admitted_at,
-             d.decision,d.reviewer,d.reason,d.decided_at
+             r.decision,r.reviewer,r.reason,r.decided_at
       FROM review_candidates c JOIN jobs j ON j.job_id=c.job_id
-      LEFT JOIN review_decisions d ON d.decision_id=(
-        SELECT decision_id FROM review_decisions WHERE candidate_id=c.candidate_id
-        ORDER BY decided_at DESC,decision_id DESC LIMIT 1)
+      LEFT JOIN review_decisions r ON r.decision_id=(
+        {_LATEST_DECISION.format(candidate="c.candidate_id")})
       ORDER BY c.admitted_at,c.candidate_id LIMIT ?
     """, (limit,)).fetchall()
     keys = ("candidate_id", "job_id", "plugin_id", "source_path", "result_sha256", "admitted_at",
@@ -112,18 +123,22 @@ def decide(database: sqlite3.Connection, candidate_id: str, decision: str, revie
     if hashlib.sha256(canonical.encode()).hexdigest() != expected_hash:
         raise ValueError("Review candidate result identity mismatch")
     decided_at = _now()
-    previous = database.execute(
-        "SELECT decision_id FROM review_decisions WHERE candidate_id=? ORDER BY decided_at DESC,decision_id DESC LIMIT 1",
-        (candidate_id,),
-    ).fetchone()
-    previous_decision_id = previous[0] if previous else ""
-    decision_id = _decision_hash(candidate_id, decision, reviewer.strip(), reason.strip(), decided_at, previous_decision_id)
-    database.execute(
-        "INSERT INTO review_decisions(decision_id,candidate_id,decision,reviewer,reason,decided_at,previous_decision_id,decision_hash) VALUES(?,?,?,?,?,?,?,?)",
-        (decision_id, candidate_id, decision, reviewer.strip(), reason.strip(), decided_at,
-         previous_decision_id or None, decision_id),
-    )
-    database.commit()
+    # Read the chain end and append in one write transaction, so two reviewers deciding
+    # at once cannot both extend the same predecessor.
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        previous = database.execute(_LATEST_DECISION.format(candidate="?"), (candidate_id,)).fetchone()
+        previous_decision_id = previous[0] if previous else ""
+        decision_id = _decision_hash(candidate_id, decision, reviewer.strip(), reason.strip(), decided_at, previous_decision_id)
+        database.execute(
+            "INSERT INTO review_decisions(decision_id,candidate_id,decision,reviewer,reason,decided_at,previous_decision_id,decision_hash) VALUES(?,?,?,?,?,?,?,?)",
+            (decision_id, candidate_id, decision, reviewer.strip(), reason.strip(), decided_at,
+             previous_decision_id or None, decision_id),
+        )
+        database.commit()
+    except BaseException:
+        database.rollback()
+        raise
     return decision_id
 
 
@@ -142,12 +157,21 @@ def verify_decisions(database: sqlite3.Connection) -> dict[str, int | bool]:
     checked = 0
     candidates = database.execute("SELECT candidate_id FROM review_candidates ORDER BY candidate_id").fetchall()
     for (candidate_id,) in candidates:
-        previous = ""
         rows = database.execute(
             "SELECT decision_id,decision,reviewer,reason,decided_at,previous_decision_id,decision_hash "
-            "FROM review_decisions WHERE candidate_id=? ORDER BY decided_at,decision_id", (candidate_id,)
+            "FROM review_decisions WHERE candidate_id=?", (candidate_id,)
         ).fetchall()
-        for decision_id, decision, reviewer, reason, decided_at, linked_previous, stored_hash in rows:
+        # Walk the chain from its root by predecessor links, not by timestamp: every
+        # decision must have exactly one successor except the last, and all must be reached.
+        successors: dict[str, list[tuple]] = {}
+        for row in rows:
+            successors.setdefault(row[5] or "", []).append(row)
+        previous = ""
+        for _ in rows:
+            following = successors.get(previous, [])
+            if len(following) != 1:
+                raise ValueError(f"Review decision chain verification failed for {candidate_id}")
+            decision_id, decision, reviewer, reason, decided_at, linked_previous, stored_hash = following[0]
             expected = _decision_hash(candidate_id, decision, reviewer, reason, decided_at, previous)
             if linked_previous != (previous or None) or decision_id != expected or stored_hash != expected:
                 raise ValueError(f"Review decision chain verification failed for {candidate_id}")
