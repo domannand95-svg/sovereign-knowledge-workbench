@@ -11,6 +11,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 
+from .analysis import stored_summary
 from .model import Classification, FileRecord
 
 
@@ -235,8 +236,12 @@ def classify_with_local_model(
         confidence = float(value["confidence"])
         if not 0 <= confidence <= 1:
             raise ModelError("Model confidence is outside 0..1")
-        labels = tuple(str(item)[:80] for item in value.get("labels", [])[:12])
-        return Classification(module, confidence, labels, str(value.get("summary", ""))[:1000], "local_model_candidate")
+        # The model's own summary and any free-text label could quote the document, so
+        # neither is kept: labels must name an allowed module.
+        labels = tuple(dict.fromkeys(str(item) for item in value.get("labels", [])[:12]
+                                     if str(item) in modules))
+        return Classification(module, confidence, labels, stored_summary(record.extracted_text),
+                              "local_model_candidate")
     except ModelError:
         raise
     except (OSError, http.client.HTTPException) as exc:

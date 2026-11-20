@@ -7,6 +7,7 @@ import zipfile
 
 import pytest
 
+from sovereign_workbench.analysis import NOT_STORED_SUMMARY
 from sovereign_workbench.intake import scan_files
 from sovereign_workbench.review_batches import (admit as _admit, connect, counts, create_next, export_review_csv,
     import_dataset_allocations, import_research_evidence_returns, import_review_csv, store_candidates, export_research_tickets, export_staging_manifest, export_review_xlsx,
@@ -158,7 +159,8 @@ def test_candidate_population_is_immutable_and_exported(tmp_path: Path):
         assert store_candidates(database, batch["batch_id"], [candidate]) == 1
         assert store_candidates(database, batch["batch_id"], [candidate]) == 0
         export_review_csv(database, batch["batch_id"], output)
-        assert "Bounded summary" in output.read_text(encoding="utf-8-sig")
+        exported = output.read_text(encoding="utf-8-sig")
+        assert "Bounded summary" not in exported and NOT_STORED_SUMMARY in exported
 
 
 def test_exception_routing_separates_spot_check_manual_and_recovery(tmp_path: Path):

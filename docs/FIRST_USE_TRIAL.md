@@ -8,6 +8,11 @@ any document, and a review decision is a record, not permission to do any of tho
 Run the commands from the repository folder in PowerShell. The examples use
 `C:\skw-trial` for everything; change it if you like.
 
+Use only the commands below. The family, section and dataset commands
+(`archive-family-*`, `archive-section-*`) and the `research.claims` plugin still store
+document excerpts and are not part of this trial. `archive-batch-status` reports
+`stored_document_text`; it should say `"contains_document_text": false`.
+
 ## 1. Make a synthetic folder
 
 Use invented content only. A quick way is the end-to-end script, which builds a mixed

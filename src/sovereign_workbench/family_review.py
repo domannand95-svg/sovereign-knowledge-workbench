@@ -97,7 +97,7 @@ def build_family_proposals(database: sqlite3.Connection) -> dict[str, int]:
     """Create inert family, claim, coverage and relationship proposals from stored evidence."""
     rows = database.execute(
         "SELECT s.source_id,s.relative_path,s.source_sha256,COALESCE(c.proposed_topic,'Needs review'),"
-        "COALESCE(c.model_summary,''),s.root FROM review_sources s LEFT JOIN archive_review_candidates c "
+        "'',s.root FROM review_sources s LEFT JOIN archive_review_candidates c "
         "ON c.source_id=s.source_id ORDER BY s.relative_path,s.source_id"
     ).fetchall()
     parent = {row[0]: row[0] for row in rows}
@@ -164,7 +164,8 @@ def build_family_proposals(database: sqlite3.Connection) -> dict[str, int]:
                 "INSERT OR IGNORE INTO archive_document_family_members VALUES(?,?,?,?)",
                 (family_id, source_id, source_hash, "Candidate filename/topic cluster")).rowcount
             source_text = text_cache[source_id]
-            for section, normalized, excerpt in _claim_units(source_text or summary):
+            # Only hash-verified text; never a stored summary as a stand-in.
+            for section, normalized, excerpt in _claim_units(source_text or ""):
                 claim_contract = {"family_id": family_id, "normalized_claim": normalized}
                 _, claim_hash = _canonical(claim_contract); claim_id = f"CLM-{claim_hash[:24]}"
                 counts["claims"] += database.execute(

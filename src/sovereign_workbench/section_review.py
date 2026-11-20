@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from .family_review import _verified_text
+from .review_batches import SUMMARY_SQL
 
 
 TOPIC_TERMS = {
@@ -152,8 +153,8 @@ def document_exception_maps(database: sqlite3.Connection) -> list[dict[str, obje
     maps: list[dict[str, object]] = []
     for source_id, relative_path, source_sha256 in sources:
         candidate = database.execute(
-            "SELECT model_summary,proposed_topic,proposed_maturity,proposed_authority,proposal_reason "
-            "FROM archive_review_candidates WHERE source_id=?", (source_id,)
+            f"SELECT {SUMMARY_SQL},c.proposed_topic,c.proposed_maturity,c.proposed_authority,"
+            "c.proposal_reason FROM archive_review_candidates c WHERE c.source_id=?", (source_id,)
         ).fetchone()
         evidence_rows = database.execute(
             "SELECT x.heading,x.bounded_excerpt,p.proposed_topic,p.confidence,p.reason "

@@ -7,6 +7,7 @@ import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .analysis import NOT_STORED_SUMMARY, stored_summary
 from .model import FileRecord
 
 
@@ -452,6 +453,10 @@ def _now() -> str:
 
 # The ledger-wide rule for "latest decision", shared with the export and allocation gates.
 LATEST_DECISION_ORDER = "decided_at DESC,decision_id DESC"
+# Read in place of the stored summary column, which older versions filled with document
+# text: only the marker (or "" for no text) ever leaves the database.
+SUMMARY_SQL = ("CASE WHEN COALESCE(c.model_summary,'')='' THEN '' "
+               f"ELSE '{NOT_STORED_SUMMARY}' END")
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -596,6 +601,30 @@ def record_import_exclusions(database: sqlite3.Connection, root: Path, records: 
                          "size_bytes": record.size_bytes, "limit_bytes": limit_bytes})
     database.commit()
     return excluded
+
+
+def stored_text_inventory(database: sqlite3.Connection) -> dict[str, object]:
+    """Count rows in this database that hold document text, without reading or showing it.
+
+    Candidate summaries other than the marker were written by older versions. Family claim
+    and section rows are written by the family and section features, which still store
+    excerpts. Nothing here changes or removes any row.
+    """
+    rows = {
+        "candidate_summaries": database.execute(
+            "SELECT COUNT(*) FROM archive_review_candidates WHERE model_summary NOT IN ('',?)",
+            (NOT_STORED_SUMMARY,)).fetchone()[0],
+        "family_claims": database.execute("SELECT COUNT(*) FROM archive_family_claims").fetchone()[0],
+        "family_claim_excerpts": database.execute(
+            "SELECT COUNT(*) FROM archive_family_claim_coverage").fetchone()[0],
+        "section_excerpts": database.execute(
+            "SELECT COUNT(*) FROM archive_document_sections").fetchone()[0],
+        "family_research_tickets": database.execute(
+            "SELECT COUNT(*) FROM archive_family_research_tickets").fetchone()[0],
+        "section_research_tickets": database.execute(
+            "SELECT COUNT(*) FROM archive_section_research_tickets").fetchone()[0],
+    }
+    return {"contains_document_text": any(rows.values()), "rows": rows}
 
 
 def open_import_exclusions(database: sqlite3.Connection, *, limit: int = 100) -> dict[str, object]:
@@ -808,7 +837,7 @@ def routing_counts(database: sqlite3.Connection) -> dict[str, int]:
 def _review_rows(database: sqlite3.Connection, batch_id: str) -> list[tuple[object, ...]]:
     rows = database.execute(
         "SELECT s.source_id,s.relative_path,s.source_sha256,s.modified_ns,s.extraction_status,"
-        "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
+        f"{SUMMARY_SQL},COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
         "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,''),"
         "COALESCE(r.classification_confidence,0.0),COALESCE(r.review_route,'MANUAL_REVIEW_REQUIRED'),"
         "COALESCE(r.route_reasons,'candidate routing is unavailable') "
@@ -1014,6 +1043,7 @@ def store_candidates(database: sqlite3.Connection, batch_id: str,
         value = {key: str(candidate.get(key, "")) for key in
                  ("source_id", "model_summary", "proposed_topic", "proposed_maturity",
                   "proposed_authority", "proposal_reason")}
+        value["model_summary"] = stored_summary(value["model_summary"])  # never document text
         canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode()).hexdigest()
         cursor = database.execute(
@@ -1425,7 +1455,7 @@ def export_training_split(database: sqlite3.Connection, train: Path, evaluation:
         "FROM archive_review_decisions d) "
         "SELECT d.decision_id,d.source_id,d.decision,d.topic,d.maturity,d.authority,d.confidence,"
         "d.privacy_status,d.canonical_status,d.review_note,d.research_question,"
-        "COALESCE(c.model_summary,''),COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
+        f"{SUMMARY_SQL},COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
         "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,''),"
         "a.allocation,a.source_family_id,a.behavior_category "
         "FROM ranked_decisions d JOIN archive_dataset_allocations a ON a.source_id=d.source_id "

@@ -39,10 +39,11 @@ TOO_LARGE = "TOO_LARGE_TO_SEARCH"
 UNREADABLE = "UNREADABLE"
 NO_TEXT = "NO_SEARCHABLE_TEXT"
 
-METADATA_FIELDS = ("relative_path", "model_summary", "topic", "review_note", "research_question")
+# The candidate summary is not searched: it holds no document text (older databases may
+# hold an excerpt there, which must never be matched or shown).
+METADATA_FIELDS = ("relative_path", "topic", "review_note", "research_question")
 METADATA_LABELS = {
     "relative_path": "file name",
-    "model_summary": "Workbench-generated summary",
     "topic": "your review topic",
     "review_note": "your review note",
     "research_question": "your research question",
@@ -205,7 +206,7 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
         "SELECT canonical_root,root_id FROM archive_intake_roots")}
     rows = database.execute(
         "SELECT s.source_id,s.root,s.relative_path,s.source_sha256,"
-        "COALESCE(i.batch_id,''),COALESCE(c.model_summary,'') FROM review_sources s "
+        "COALESCE(i.batch_id,''),'' FROM review_sources s "
         "LEFT JOIN review_batch_items i ON i.source_id=s.source_id "
         "LEFT JOIN archive_review_candidates c ON c.source_id=s.source_id "
         "ORDER BY s.root,s.relative_path,s.source_id"
@@ -247,7 +248,7 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
             unverified.append({"source_id": source_id, "relative_path": relative,
                                "intake_root": root, "status": status})
 
-        metadata = {"relative_path": relative, "model_summary": summary}
+        metadata = {"relative_path": relative}
         if decision:
             metadata.update({key: decision[key] for key in
                              ("topic", "review_note", "research_question")})

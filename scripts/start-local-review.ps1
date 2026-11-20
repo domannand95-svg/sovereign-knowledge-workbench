@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$StateDb,
-    [string]$Reviewer = "Dominic Annand"
+    [Parameter(Mandatory = $true)][string]$Reviewer
 )
 
 $ErrorActionPreference = "Stop"

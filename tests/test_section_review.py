@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from sovereign_workbench.analysis import NOT_STORED_SUMMARY
 from sovereign_workbench.intake import scan_files
 from sovereign_workbench.review_batches import (
     admit, connect, create_next, register_intake_root, store_candidates,
@@ -38,7 +39,7 @@ def test_section_split_and_cross_family_proposals_preserve_one_original(tmp_path
         assert source.exists()
         maps = document_exception_maps(database)
         assert len(maps) == 1 and maps[0]["review_required"] is True
-        assert maps[0]["candidate"]["summary"] == "Multi-domain appendix"
+        assert maps[0]["candidate"]["summary"] == NOT_STORED_SUMMARY
         assert maps[0]["section_evidence"][0]["excerpt"]
         assert maps[0]["exceptions"]["cross_family"]
         assert maps[0]["exceptions"]["low_confidence"]["count"] == 0
