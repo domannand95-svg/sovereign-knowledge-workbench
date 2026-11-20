@@ -19,6 +19,7 @@ from .staging import (StagingError, build_plan as build_stage_plan, connect as c
 from .review_batches import (admit as admit_review_sources, connect as connect_review_batches,
                              counts as review_batch_counts, commit_prepared_batch as commit_prepared_review_batch,
                              prepare_next as prepare_review_batch,
+                             pending_source_ids, stale_pending as stale_pending_sources,
                              export_review_csv, export_review_xlsx, import_review_csv,
                              relationship_counts, routing_counts,
                              open_import_exclusions, record_import_exclusions)
@@ -404,17 +405,23 @@ def main(argv: list[str] | None = None) -> int:
                     ).fetchall()}
                     records = _deduplicate_records(records, admitted_hashes, args.limit)
                 admitted = admit_review_sources(database, args.root, records)
-                prepared = prepare_review_batch(database, limit=args.limit)
+                # Batch only this root's pending sources whose file still holds the admitted
+                # bytes. Others (left by an interrupted import, then changed or removed) stay
+                # pending and are reported: they are never given another file's text.
+                current_ids = pending_source_ids(args.root, corpus_records)
+                prepared = prepare_review_batch(database, limit=args.limit, root=args.root,
+                                                source_ids=current_ids)
+                stale = stale_pending_sources(database, args.root, current_ids)
                 batch = None
                 candidate_count = 0
                 relationship_count = 0
                 model_failures = 0
                 model_attempts = 0
                 if prepared:
-                    by_path = {record.relative_path: record for record in records}
+                    by_path = {(record.relative_path, record.sha256): record for record in corpus_records}
                     candidates = []
                     for item in prepared:
-                        record = by_path[item["relative_path"]]
+                        record = by_path[(item["relative_path"], item["source_sha256"])]
                         classification = classify(record, taxonomy)
                         provenance = classification.source
                         if local_model_config and record.extracted_text:
@@ -444,15 +451,17 @@ def main(argv: list[str] | None = None) -> int:
                                 taxonomy.fallback_module if taxonomy else "unclassified"
                             },
                             "risk_flags": [finding.kind for finding in privacy_findings(record)]})
-                    selected_records = [(item["source_id"], by_path[item["relative_path"]]) for item in prepared]
+                    selected_records = [(item["source_id"], by_path[(item["relative_path"], item["source_sha256"])])
+                                        for item in prepared]
                     relationships = detect_relationships(selected_records, corpus_records)
                     batch, candidate_count, relationship_count = commit_prepared_review_batch(
-                        database, prepared, candidates, relationships, limit=args.limit)
+                        database, prepared, candidates, relationships, limit=args.limit,
+                        root=args.root, source_ids=current_ids)
                 # Recorded only once the import has passed its checks and committed.
                 excluded = record_import_exclusions(database, args.root, considered,
                                                     args.max_file_mb * 1024 * 1024)
                 print(json.dumps({"admitted": admitted, "candidates": candidate_count,
-                    "excluded": excluded,
+                    "excluded": excluded, "stale_pending": stale,
                     "relationships": relationship_count, "model_failures": model_failures,
                     "batch": batch, "status": review_batch_counts(database),
                     "routing": routing_counts(database),
@@ -465,6 +474,14 @@ def main(argv: list[str] | None = None) -> int:
                           f"than --max-file-mb {args.max_file_mb}: {shown}{more}. They are listed under "
                           "'excluded' here and in archive-batch-status; re-run with a larger "
                           "--max-file-mb to import them.", file=sys.stderr)
+                if stale:
+                    shown = ", ".join(item["relative_path"] for item in stale[:5])
+                    more = f" and {len(stale) - 5} more" if len(stale) > 5 else ""
+                    print(f"warning: {len(stale)} admitted file{'s' if len(stale) != 1 else ''} changed "
+                          f"or disappeared before batching and stay pending: {shown}{more}. Their "
+                          "admitted versions are no longer at those paths, so they cannot be batched; "
+                          "any current version is admitted as a new source. They are listed under "
+                          "'stale_pending'.", file=sys.stderr)
                 if model_failures:
                     print(f"warning: the local model was unavailable for {model_failures} of "
                           f"{model_attempts} documents; the deterministic classifier was used for "
