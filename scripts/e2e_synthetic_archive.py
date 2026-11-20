@@ -251,10 +251,15 @@ def run(files: int, workdir: Path, seed: int, kill_after: float) -> dict[str, ob
         batches.append(outcome["batch"])
         if runs > 20:
             break
-    status = r.skw("archive-batch-status", "--state-db", str(db))["status"]
+    overview = r.skw("archive-batch-status", "--state-db", str(db))
+    status, excluded = overview["status"], overview.get("excluded", {"count": 0, "files": []})
     batched = sum(len(b["items"]) for b in batches)
-    r.check("every eligible file is batched exactly once", batched == files and status["pending"] == 0,
-            {"batched": batched, "files": files, "status": status})
+    r.check("every file is either batched once or recorded as excluded",
+            batched + excluded["count"] == files and status["pending"] == 0,
+            {"batched": batched, "excluded": excluded["count"], "files": files, "status": status})
+    r.check("the oversized file is recorded as excluded with its reason",
+            [(f["relative_path"], f["reason"]) for f in excluded["files"]]
+            == [("projects/oversized.txt", "OVER_SIZE_LIMIT")], excluded)
     r.check("database invariants after import", not _db_invariants(db), _db_invariants(db))
 
     # Human review: all but the last batch through CSV, the last through the review screen.

@@ -20,7 +20,8 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              counts as review_batch_counts, commit_prepared_batch as commit_prepared_review_batch,
                              prepare_next as prepare_review_batch,
                              export_review_csv, export_review_xlsx, import_review_csv,
-                             relationship_counts, routing_counts)
+                             relationship_counts, routing_counts,
+                             open_import_exclusions, record_import_exclusions)
 from .review_batches import _check_limit as check_batch_limit
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
@@ -396,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.selection_manifest:
                 records = _select_manifest_records(args.root, records, args.selection_manifest)
             with connect_review_batches(args.state_db) as database:
+                excluded = record_import_exclusions(database, args.root, records,
+                                                    args.max_file_mb * 1024 * 1024)
                 if args.deduplicate_hash:
                     admitted_hashes = {row[0] for row in database.execute(
                         "SELECT DISTINCT source_sha256 FROM review_sources"
@@ -447,10 +450,19 @@ def main(argv: list[str] | None = None) -> int:
                     batch, candidate_count, relationship_count = commit_prepared_review_batch(
                         database, prepared, candidates, relationships, limit=args.limit)
                 print(json.dumps({"admitted": admitted, "candidates": candidate_count,
+                    "excluded": excluded,
                     "relationships": relationship_count, "model_failures": model_failures,
                     "batch": batch, "status": review_batch_counts(database),
                     "routing": routing_counts(database),
                     "relationship_counts": relationship_counts(database)}, sort_keys=True))
+                if excluded:
+                    shown = ", ".join(item["relative_path"] for item in excluded[:5])
+                    more = f" and {len(excluded) - 5} more" if len(excluded) > 5 else ""
+                    print(f"warning: {len(excluded)} file{'s were' if len(excluded) != 1 else ' was'} "
+                          f"not imported because {'they are' if len(excluded) != 1 else 'it is'} larger "
+                          f"than --max-file-mb {args.max_file_mb}: {shown}{more}. They are listed under "
+                          "'excluded' here and in archive-batch-status; re-run with a larger "
+                          "--max-file-mb to import them.", file=sys.stderr)
                 if model_failures:
                     print(f"warning: the local model was unavailable for {model_failures} of "
                           f"{model_attempts} documents; the deterministic classifier was used for "
@@ -469,6 +481,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "archive-batch-status":
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps({"status": review_batch_counts(database),
+                                  "excluded": open_import_exclusions(database),
                                   "routing": routing_counts(database),
                                   "relationship_counts": relationship_counts(database)}, sort_keys=True))
             return 0
