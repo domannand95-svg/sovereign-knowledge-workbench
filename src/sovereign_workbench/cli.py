@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              prepare_next as prepare_review_batch,
                              export_review_csv, export_review_xlsx, import_review_csv,
                              relationship_counts, routing_counts)
+from .review_batches import _check_limit as check_batch_limit
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
 from .search import connect_readonly, search_archive
@@ -273,7 +275,40 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def _use_utf8_output() -> None:
+    """Write UTF-8 whatever the console code page, so document text never breaks output.
+
+    Redirected output on Windows otherwise uses the ANSI code page (often cp1252), which
+    cannot encode many characters found in documents and mangles the rest.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
+def _batch_model_config() -> LocalModelConfig:
+    """Read the local model settings, refusing values that would fail the whole command."""
+    try:
+        config = LocalModelConfig.from_environment()
+    except ValueError:
+        for name in ("SKW_MODEL_TIMEOUT", "SKW_MODEL_MAX_CHARS"):
+            value = os.environ.get(name)
+            if value is not None and not value.strip().lstrip("-").isdigit():
+                raise ValueError(f"{name} is invalid: it must be a whole number") from None
+        raise
+    try:  # refuse a misconfigured timeout up front instead of failing every record
+        check_limits(config.timeout_seconds)
+    except ModelError as exc:
+        raise ValueError(f"SKW_MODEL_TIMEOUT is invalid: {exc}") from None
+    return config
+
+
 def main(argv: list[str] | None = None) -> int:
+    _use_utf8_output()
     args = parser().parse_args(argv)
     try:
         if args.command == "plugin-list":
@@ -368,6 +403,10 @@ def main(argv: list[str] | None = None) -> int:
                                  sort_keys=True))
             return 0
         if args.command == "archive-batch-create":
+            # Check everything that could fail the command before scanning the archive.
+            check_batch_limit(args.limit)
+            taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
+            local_model_config = _batch_model_config() if args.local_model else None
             suffixes = {value.casefold() if value.startswith(".") else f".{value.casefold()}" for value in args.include}
             corpus_records = scan_files(args.root, max_file_bytes=args.max_file_mb * 1024 * 1024,
                                         include_suffixes=suffixes)
@@ -387,13 +426,6 @@ def main(argv: list[str] | None = None) -> int:
                 relationship_count = 0
                 model_failures = 0
                 if prepared:
-                    taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
-                    local_model_config = LocalModelConfig.from_environment() if args.local_model else None
-                    if local_model_config:
-                        try:  # refuse a misconfigured timeout up front instead of failing every record
-                            check_limits(local_model_config.timeout_seconds)
-                        except ModelError as exc:
-                            raise ValueError(f"SKW_MODEL_TIMEOUT is invalid: {exc}") from None
                     by_path = {record.relative_path: record for record in records}
                     candidates = []
                     for item in prepared:
