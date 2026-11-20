@@ -107,10 +107,14 @@ For a simpler one-file-at-a-time Windows review screen:
 
 The screen shows the document text, read from the file only after its fingerprint
 matches the import, and the deterministic review reason, then
-offers large **APPROVE**, **RESEARCH**, **QUARANTINE**, and **REJECT** choices.
-A file that has moved or changed since import cannot be decided; **Skip for now**
-moves past it without recording anything, and skipped files return the next time
-the screen is opened. A file that still matches its import but has no readable
+offers large **APPROVE**, **NEEDS RESEARCH**, **QUARANTINE**, and **REJECT** choices
+(NEEDS RESEARCH is stored and exported as `NEEDS_RESEARCH`, as in the CSV).
+**Skip for now** moves past a file without recording anything; skipped files return
+the next time the screen is opened. When the next file has changed, moved or gone
+missing since import, the screen sets it aside for the session instead of stopping on
+it: it is listed at the top with the reason, nothing is recorded for it, and **Check
+skipped and set-aside files again** brings it back once it matches its import again. A
+file that changes while it is on screen cannot be decided. A file that still matches its import but has no readable
 text can be decided after checking the file itself. It re-hashes the exact source immediately before accepting a decision,
 automatically records the named human reviewer, and proposes an editable
 research question when needed. It has no file movement, deletion, staging,
@@ -232,13 +236,19 @@ original location and searched only if its bytes still match the SHA-256 recorde
 intake; no copy of document text is kept for searching. Each result shows the file,
 matching lines, intake root, batch and the latest human review decision.
 
+`archive-search` and `archive-batch-status` print plain text when run at a terminal and
+JSON when their output is redirected or piped, so scripts are unaffected. Choose
+explicitly with `--format text` or `--format json`.
+
 Files that are missing, changed since intake, unreadable or too large are listed under
 `unverified_sources`; verified files with no extractable text are listed under
 `not_searchable_sources`. Both lists are always complete, even when `--limit` truncates
 the results, and the current contents of an unverified file are never shown. Such files
 can still appear through recorded metadata: `metadata_matches` names the fields (file
 name, your review topic, note or research question) that contain the search text without
-quoting them. A hash match shows the text is what was admitted, not that it is true; a review
+quoting them. When a missing file's exact content is now at another admitted path in the
+same folder, it is listed under `same_content_at`: possibly the file renamed or moved, or
+an identical copy. The two records are never merged. A hash match shows the text is what was admitted, not that it is true; a review
 decision is not permission to move, export or disclose a document. The database is
 opened read-only.
 
@@ -252,7 +262,9 @@ APPROVE.
 current bytes still match what was admitted. If an import was interrupted and a pending
 file was then edited, moved or deleted, that admitted version stays pending, is listed
 under `stale_pending` with a warning, and is never given another file's text; an edited
-file's current version is admitted as a new source.
+file's current version is admitted as a new source. `archive-batch-status` lists every
+pending file under `pending` with its state (`WAITING`, `CHANGED_SINCE_ADMISSION` or
+`MISSING`), a plain explanation and any `same_content_at` paths.
 
 ## Authorization receipt verification
 

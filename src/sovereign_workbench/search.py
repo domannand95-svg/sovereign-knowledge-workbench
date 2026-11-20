@@ -193,6 +193,19 @@ def _snippet(line: str, needle: str) -> str:
     return ("…" if left else "") + window + ("…" if left + MAX_LINE_CHARS < len(line) else "")
 
 
+def _with_same_content(unverified, by_hash, rows, verified_ids):
+    """Point a missing file at admitted paths in its root that verified in this pass with the
+    same content: possibly the same file renamed or moved, or an identical copy; never merged."""
+    sha_of = {source_id: sha256 for source_id, _root, _rel, sha256, _b, _s in rows}
+    for item in unverified:
+        if item["status"] == MISSING:
+            item["same_content_at"] = sorted({
+                path for other_id, path, other_root in by_hash.get(sha_of[item["source_id"]], [])
+                if other_id in verified_ids and other_root == item["intake_root"]
+                and path != item["relative_path"]})
+    return unverified
+
+
 def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
                    max_file_bytes: int = 20 * 1024 * 1024) -> dict[str, object]:
     needle = query.strip()
@@ -216,11 +229,14 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
     unverified: list[dict[str, str]] = []
     not_searchable: list[dict[str, str]] = []
     matching_sources = 0
+    verified_ids: set[str] = set()
     # Every source is verified even after the result limit is reached, so the lists of
     # unverified and unsearchable sources are always complete.
     for source_id, root, relative, sha256, batch_id, summary in rows:
         decision = decisions.get(source_id)
         status, data = _read_verified(root, relative, sha256, max_file_bytes)
+        if status == VERIFIED:
+            verified_ids.add(source_id)
         content_matches: list[dict[str, object]] = []
         capped = False
         searched = False
@@ -300,7 +316,7 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
         "matching_sources": matching_sources,
         "results": results,
         "truncated": matching_sources > len(results),
-        "unverified_sources": unverified,
+        "unverified_sources": _with_same_content(unverified, by_hash, rows, verified_ids),
         "not_searchable_sources": not_searchable,
         "note": ("Content matches are lines from files whose bytes match the intake hash; a "
                  "match shows the text is what was admitted, not that it is true. "

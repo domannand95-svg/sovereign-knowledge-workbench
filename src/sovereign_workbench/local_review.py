@@ -164,7 +164,7 @@ class ReviewWindow:
         buttons = tk.Frame(self.root, bg="#f4f7fb")
         buttons.pack(fill="x", padx=24, pady=18)
         choices = [
-            ("APPROVE", "#237a4b"), ("RESEARCH", "#275dad"),
+            ("APPROVE", "#237a4b"), ("NEEDS RESEARCH", "#275dad"),
             ("QUARANTINE", "#a65d00"), ("REJECT", "#a12a2a"),
         ]
         for label, colour in choices:
@@ -224,7 +224,7 @@ class ReviewWindow:
         if self.index >= len(self.items):
             return
         item = self.items[self.index]
-        decision = "NEEDS_RESEARCH" if label == "RESEARCH" else label
+        decision = "NEEDS_RESEARCH" if label == "NEEDS RESEARCH" else label
         note = self.note.get("1.0", "end").strip()
         question = self.question.get("1.0", "end").strip() if decision == "NEEDS_RESEARCH" else ""
         try:
