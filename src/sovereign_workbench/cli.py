@@ -29,7 +29,7 @@ from .intake import scan_files
 from .analysis import classify, privacy_findings
 from .epistemic import assess
 from .taxonomy import load_taxonomy
-from .local_model import LocalModelConfig, ModelError, classify_with_local_model
+from .local_model import LocalModelConfig, ModelError, check_limits, classify_with_local_model
 from .relationships import detect_relationships
 from .family_review import (build_family_proposals, decide_boundary, family_report,
                             generate_research_tickets, import_evidence_return,
@@ -389,6 +389,11 @@ def main(argv: list[str] | None = None) -> int:
                 if prepared:
                     taxonomy = load_taxonomy(args.taxonomy) if args.taxonomy else None
                     local_model_config = LocalModelConfig.from_environment() if args.local_model else None
+                    if local_model_config:
+                        try:  # refuse a misconfigured timeout up front instead of failing every record
+                            check_limits(local_model_config.timeout_seconds)
+                        except ModelError as exc:
+                            raise ValueError(f"SKW_MODEL_TIMEOUT is invalid: {exc}") from None
                     by_path = {record.relative_path: record for record in records}
                     candidates = []
                     for item in prepared:

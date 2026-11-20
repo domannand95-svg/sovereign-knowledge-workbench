@@ -209,6 +209,8 @@ def classify_with_local_model(
         # so only its type is reported, and the error is raised outside the handler so the
         # original exception is not attached as context either.
         failure = f"Local model request failed closed: {type(exc).__name__}"
-    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError,
+            RecursionError, ArithmeticError) as exc:
+        # RecursionError: absurdly nested JSON; ArithmeticError: e.g. a confidence of 10**400.
         failure = f"Local model response failed closed: malformed reply ({type(exc).__name__})"
     raise ModelError(failure)

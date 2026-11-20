@@ -97,7 +97,7 @@ def _invoke(task: dict, worker: ModelWorker) -> dict:
         failure = str(exc)
     except (OSError, http.client.HTTPException) as exc:
         failure = f"Model request failed closed: {type(exc).__name__}"
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+    except (KeyError, IndexError, TypeError, ValueError, RecursionError, ArithmeticError) as exc:
         failure = f"Model response failed closed: malformed reply ({type(exc).__name__})"
     if failure is not None:  # raised outside the handlers so no original exception is attached
         raise SchedulerError(failure)
