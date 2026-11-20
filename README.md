@@ -222,7 +222,14 @@ opened read-only.
 `archive-batch-status` derives `reviewed` and `quarantined` from the latest recorded
 human decision for each source, using the same ordering as the export gates. Review CSV imports are all-or-nothing and report every
 problem together, naming the row, field and accepted values; a file may carry only one
-decision per source.
+decision per source. The staging manifest lists a source only when its latest decision is
+APPROVE.
+
+`archive-batch-create` batches only pending files of the root being imported whose
+current bytes still match what was admitted. If an import was interrupted and a pending
+file was then edited, moved or deleted, that admitted version stays pending, is listed
+under `stale_pending` with a warning, and is never given another file's text; an edited
+file's current version is admitted as a new source.
 
 ## Authorization receipt verification
 

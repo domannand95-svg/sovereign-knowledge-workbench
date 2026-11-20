@@ -23,3 +23,15 @@ def test_end_to_end_workflow_on_a_small_synthetic_archive(tmp_path):
     failed = [check for check in report["checks"] if not check["ok"]]
     assert completed.returncode == 0 and not failed, json.dumps(failed, ensure_ascii=False, indent=1)
     assert report["checks_passed"] >= 20
+
+
+def test_script_refuses_to_clear_a_folder_it_did_not_create(tmp_path):
+    keep = tmp_path / "mine"
+    keep.mkdir()
+    (keep / "important.txt").write_text("keep me", encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "--files", "20", "--workdir", str(keep)],
+        capture_output=True, timeout=120)
+    assert completed.returncode != 0
+    assert b"Refusing" in completed.stderr
+    assert (keep / "important.txt").read_text(encoding="utf-8") == "keep me"

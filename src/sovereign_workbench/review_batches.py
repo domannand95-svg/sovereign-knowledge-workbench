@@ -581,7 +581,13 @@ def record_import_exclusions(database: sqlite3.Connection, root: Path, records: 
             continue
         values = (canonical_root, record.relative_path, record.size_bytes, record.modified_ns,
                   "OVER_SIZE_LIMIT", limit_bytes)
-        exclusion_id = hashlib.sha256(json.dumps(values).encode("utf-8")).hexdigest()
+        # Repeated sightings share one row, but a sighting after a later admission of this
+        # path is a new row, so a restored oversized file is reported again.
+        last_admitted = database.execute(
+            "SELECT COALESCE(MAX(admitted_at),'') FROM review_sources WHERE root=? AND relative_path=?",
+            (canonical_root, record.relative_path)).fetchone()[0]
+        identity = values if not last_admitted else (*values, last_admitted)
+        exclusion_id = hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()
         database.execute(
             "INSERT OR IGNORE INTO archive_import_exclusions(exclusion_id,root,relative_path,size_bytes,"
             "modified_ns,reason,limit_bytes,observed_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -626,6 +632,10 @@ _PENDING_ITEMS_SQL = (
     "SELECT source_id,root,relative_path,source_sha256,size_bytes,modified_ns,extraction_status "
     "FROM review_sources WHERE state='pending' ORDER BY root,relative_path,source_id LIMIT ?"
 )
+_PENDING_ITEMS_FOR_ROOT_SQL = (
+    "SELECT source_id,root,relative_path,source_sha256,size_bytes,modified_ns,extraction_status "
+    "FROM review_sources WHERE state='pending' AND root=? ORDER BY root,relative_path,source_id"
+)
 
 
 def _check_limit(limit: int) -> None:
@@ -633,9 +643,31 @@ def _check_limit(limit: int) -> None:
         raise ValueError("Batch limit must be between 1 and 1000")
 
 
-def _pending_items(database: sqlite3.Connection, limit: int) -> list[dict[str, object]]:
-    return [dict(zip(_PENDING_ITEM_FIELDS, row, strict=True))
-            for row in database.execute(_PENDING_ITEMS_SQL, (limit,)).fetchall()]
+def _pending_items(database: sqlite3.Connection, limit: int, *, root: str | None = None,
+                   source_ids: frozenset[str] | None = None) -> list[dict[str, object]]:
+    if root is None and source_ids is None:
+        rows = database.execute(_PENDING_ITEMS_SQL, (limit,)).fetchall()
+    else:
+        rows = database.execute(_PENDING_ITEMS_FOR_ROOT_SQL, (root,)).fetchall()
+        if source_ids is not None:
+            rows = [row for row in rows if row[0] in source_ids]
+        rows = rows[:limit]
+    return [dict(zip(_PENDING_ITEM_FIELDS, row, strict=True)) for row in rows]
+
+
+def pending_source_ids(root: Path, records: list[FileRecord]) -> frozenset[str]:
+    """The source ids these scanned records would have. A pending source whose id is not
+    here no longer matches its file: it changed, moved or disappeared since admission."""
+    canonical_root = str(root.resolve(strict=True))
+    return frozenset(_source_id(canonical_root, record) for record in records if record.sha256)
+
+
+def stale_pending(database: sqlite3.Connection, root: Path,
+                  current: frozenset[str]) -> list[dict[str, object]]:
+    """Pending sources of this root whose admitted bytes are no longer at their path."""
+    return [{"source_id": row[0], "relative_path": row[2], "source_sha256": row[3]}
+            for row in database.execute(_PENDING_ITEMS_FOR_ROOT_SQL, (_root_key(root),)).fetchall()
+            if row[0] not in current]
 
 
 def _begin_batch_transaction(database: sqlite3.Connection) -> None:
@@ -690,10 +722,19 @@ def create_next(database: sqlite3.Connection, *, limit: int = 25) -> dict[str, o
         raise
 
 
-def prepare_next(database: sqlite3.Connection, *, limit: int = 25) -> list[dict[str, object]]:
-    """Read the sources the next batch would contain, without writing or locking anything."""
+def prepare_next(database: sqlite3.Connection, *, limit: int = 25, root: Path | None = None,
+                 source_ids: frozenset[str] | None = None) -> list[dict[str, object]]:
+    """Read the sources the next batch would contain, without writing or locking anything.
+
+    With ``root``, only that root's pending sources are considered; with ``source_ids``,
+    only those (the ones whose current file still matches what was admitted).
+    """
     _check_limit(limit)
-    return _pending_items(database, limit)
+    return _pending_items(database, limit, root=_root_key(root), source_ids=source_ids)
+
+
+def _root_key(root: Path | None) -> str | None:
+    return None if root is None else str(root.resolve(strict=True))
 
 
 def commit_prepared_batch(
@@ -703,6 +744,8 @@ def commit_prepared_batch(
     relationships: list[dict[str, object]],
     *,
     limit: int,
+    root: Path | None = None,
+    source_ids: frozenset[str] | None = None,
 ) -> tuple[dict[str, object], int, int]:
     """Write the batch, its candidates and its relationships in one transaction.
 
@@ -715,7 +758,7 @@ def commit_prepared_batch(
         raise ValueError("A prepared batch must contain at least one source")
     _begin_batch_transaction(database)
     try:
-        if _pending_items(database, limit) != prepared:
+        if _pending_items(database, limit, root=_root_key(root), source_ids=source_ids) != prepared:
             raise StalePreparationError(
                 "The pending sources changed while this batch was being prepared, so no batch was "
                 "written. Rerun archive-batch-create."
@@ -1352,9 +1395,11 @@ def export_staging_manifest(database: sqlite3.Connection, output: Path) -> dict[
     if output.exists():
         raise ValueError("Staging manifest already exists")
     rows = database.execute(
+        "WITH ranked AS (SELECT d.*,ROW_NUMBER() OVER (PARTITION BY d.source_id "
+        f"ORDER BY {LATEST_DECISION_ORDER}) AS decision_rank FROM archive_review_decisions d) "
         "SELECT d.decision_id,s.root,s.relative_path,s.source_sha256,d.topic,d.maturity "
-        "FROM archive_review_decisions d JOIN review_sources s ON s.source_id=d.source_id "
-        "WHERE d.decision='APPROVE' ORDER BY d.decision_id"
+        "FROM ranked d JOIN review_sources s ON s.source_id=d.source_id "
+        "WHERE d.decision_rank=1 AND d.decision='APPROVE' ORDER BY d.decision_id"
     ).fetchall()
     items = [{"decision_id": decision_id, "source_path": str(Path(root) / relative_path),
               "source_sha256": digest, "proposed_relative_target": str(Path(topic) / maturity / relative_path),

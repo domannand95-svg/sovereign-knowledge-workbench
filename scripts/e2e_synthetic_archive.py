@@ -203,10 +203,15 @@ def _review_api(db: Path):
 
 
 def run(files: int, workdir: Path, seed: int, kill_after: float) -> dict[str, object]:
-    if workdir.exists():
+    marker = workdir / ".skw-e2e-workdir"
+    if workdir.exists() and any(workdir.iterdir()):
+        if not marker.is_file():  # never delete a folder this script did not create
+            raise SystemExit(f"Refusing to use {workdir}: it is not empty and was not created by "
+                             "this script. Choose a new folder.")
         shutil.rmtree(workdir)
     archive, db = workdir / "archive", workdir / "state.db"
     archive.mkdir(parents=True)
+    marker.write_text("synthetic end-to-end work folder; safe to delete\n", encoding="utf-8")
     r = Runner(workdir)
     include = ["--include", ".md", ".txt", ".docx", ".pdf"]
 
