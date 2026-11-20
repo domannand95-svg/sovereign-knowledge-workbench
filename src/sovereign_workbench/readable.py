@@ -37,13 +37,15 @@ def render_status(value: dict) -> str:
             lines.append(f"  {item['relative_path']}")
             lines.append(f"      {item['explanation']}")
         if pending.get("truncated"):
-            lines.append(f"  … and {pending['count'] - len(pending['files'])} more (see --format json)")
+            lines.append(f"  … and {pending['count'] - len(pending['files'])} more not listed")
 
     excluded = value.get("excluded") or {"count": 0, "files": []}
     if excluded["count"]:
         lines += ["", f"Not imported because they are too large ({excluded['count']}):"]
         for item in excluded["files"]:
             lines.append(f"  {item['relative_path']} ({_mb(item['size_bytes'])}; limit {_mb(item['limit_bytes'])})")
+        if excluded["count"] > len(excluded["files"]):
+            lines.append(f"  … and {excluded['count'] - len(excluded['files'])} more not listed")
 
     stored = value.get("stored_document_text")
     if stored is not None:
@@ -84,7 +86,8 @@ def render_search(value: dict) -> str:
             line = f"  {item['relative_path']}: {STATUS_MESSAGES.get(item['status'], item['status'])}"
             if item.get("same_content_at"):
                 line += ("; the same content is now at " + ", ".join(item["same_content_at"])
-                         + " (possibly renamed or moved; kept as a separate record)")
+                         + " (possibly this file renamed or moved, or an identical copy; "
+                         "kept as separate records)")
             lines.append(line)
     textless = value.get("not_searchable_sources") or []
     if textless:

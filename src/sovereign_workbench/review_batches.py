@@ -716,15 +716,29 @@ PENDING_EXPLANATIONS = {
 
 def same_content_paths(database: sqlite3.Connection, root: str, sha256: str,
                        exclude_path: str) -> list[str]:
-    """Other admitted paths in this root with exactly the same content that exist now.
+    """Other admitted paths in this root whose current bytes have exactly this content.
 
-    Same content is evidence of a possible rename or move, or of an identical copy; it is
-    never treated as proof that two records are the same file, and records are not merged.
+    Each candidate is re-hashed now, so a copy that has since changed is never named. Same
+    content is evidence of a possible rename or move, or of an identical copy; it is never
+    treated as proof that two records are the same file, and records are not merged.
     """
     return [path for (path,) in database.execute(
         "SELECT DISTINCT relative_path FROM review_sources WHERE root=? AND source_sha256=? "
         "AND relative_path<>? ORDER BY relative_path", (root, sha256, exclude_path))
-        if Path(root, path).is_file()]
+        if _file_sha256(Path(root, path)) == sha256]
+
+
+def _file_sha256(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 def _pending_state(root: str, relative: str, sha256: str, size: int, modified_ns: int) -> str:
@@ -737,14 +751,10 @@ def _pending_state(root: str, relative: str, sha256: str, size: int, modified_ns
         return "MISSING"
     if stat.st_size == size and stat.st_mtime_ns == modified_ns:
         return "WAITING"
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(block)
-    except OSError:
+    current = _file_sha256(path)
+    if current is None:
         return "MISSING"
-    return "WAITING" if digest.hexdigest() == sha256 else "CHANGED_SINCE_ADMISSION"
+    return "WAITING" if current == sha256 else "CHANGED_SINCE_ADMISSION"
 
 
 def pending_overview(database: sqlite3.Connection, *, limit: int = 100) -> dict[str, object]:

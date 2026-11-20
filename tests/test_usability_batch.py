@@ -195,3 +195,29 @@ def test_single_oversized_file_warning_is_singular(archive, capsys):
                "--max-file-mb", "1").err
     assert "1 file was not imported because it is larger" in err
     assert "It is listed under 'excluded'" in err and "They are listed" not in err
+
+
+def test_same_content_hint_never_points_at_a_copy_that_has_changed(archive, capsys):
+    # Found in independent review: the hint checked only that the other path existed.
+    docs, db = archive
+    for name in ("a-one.txt", "b-two.txt", "c-three.txt"):
+        (docs / name).write_text("identical body\n", encoding="utf-8")
+    _run(capsys, "archive-batch-create", str(docs), "--state-db", str(db), "--include", ".txt")
+    (docs / "a-one.txt").unlink()
+    (docs / "b-two.txt").write_text("edited since import\n", encoding="utf-8")
+    found = _json(capsys, "archive-search", "identical", "--state-db", str(db))
+    [missing] = [item for item in found["unverified_sources"] if item["relative_path"] == "a-one.txt"]
+    assert missing["same_content_at"] == ["c-three.txt"]
+    text = _run(capsys, "archive-search", "identical", "--state-db", str(db), "--format", "text").out
+    assert "or an identical copy" in text
+
+
+def test_stale_hint_never_points_at_a_changed_copy(archive, capsys):
+    docs, db = archive
+    (docs / "copy.txt").write_text("alpha.txt seedling notes\n", encoding="utf-8")  # same as alpha
+    _interrupted(docs, db)
+    (docs / "alpha.txt").unlink()
+    (docs / "copy.txt").write_text("changed copy\n", encoding="utf-8")
+    pending = _json(capsys, "archive-batch-status", "--state-db", str(db))["pending"]
+    [item] = [entry for entry in pending["files"] if entry["relative_path"] == "alpha.txt"]
+    assert item["state"] == "MISSING" and item["same_content_at"] == []
