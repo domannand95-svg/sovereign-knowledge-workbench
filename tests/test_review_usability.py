@@ -130,7 +130,7 @@ def test_search_groups_identical_copies_and_labels_metadata(archive, capsys):
         [twin] = hit["identical_at_import"]
         assert twin["relative_path"] != hit["relative_path"]
         assert twin["intake_root"] == hit["intake_root"]
-        assert hit["metadata_match_labels"] == ["Workbench-generated summary"]
+        assert hit["metadata_match_labels"] == []  # matched in verified content only
 
 
 def test_only_the_current_item_is_served(screen):

@@ -26,7 +26,7 @@ The optional runtime plugin pack is pinned to the reviewed commit of
 | BKI | Deterministic document validation, normalization evidence, and provenance |
 | Sovereign OS | Identity, policy, capability grants, effect authorization, and replay |
 | Workbench | Read-only intake, extraction, classification candidates, review queues, routing candidates, and packages |
-| Local model | Probabilistic classification and summary candidates only |
+| Local model | Probabilistic classification candidates only; its summary is not kept |
 | Human operator | Final review, recipient choice, disclosure decision, and approval |
 
 The governing rule is: **probabilistic intelligence; deterministic authority**.
@@ -105,7 +105,8 @@ For a simpler one-file-at-a-time Windows review screen:
   -Reviewer "Dominic Annand"
 ```
 
-The screen shows the bounded summary and deterministic review reason, then
+The screen shows the document text, read from the file only after its fingerprint
+matches the import, and the deterministic review reason, then
 offers large **APPROVE**, **RESEARCH**, **QUARANTINE**, and **REJECT** choices.
 A file that has moved or changed since import cannot be decided; **Skip for now**
 moves past it without recording anything, and skipped files return the next time
@@ -197,6 +198,28 @@ recovers interrupted jobs, rejects reuse of a task identity with changed
 content, and bounds task count, prompt bytes, response bytes, concurrency, and
 execution time.
 
+## What the review database stores
+
+The archive review workflow (`archive-intake-register`, `archive-batch-create`, the review
+screens, CSV review, `archive-search`, `archive-batch-status` and the staging manifest)
+stores file paths, SHA-256 fingerprints, sizes, timestamps, proposed classifications,
+routing reasons, relationships between files and your decisions and notes. It does **not**
+store document text: the candidate `model_summary` field holds only the marker
+"Not stored: read the verified document." (or nothing when the file has no readable text).
+Document text is read from the original file, and only after its bytes match the
+fingerprint recorded at import.
+
+Databases created before this change may hold the first 280 characters of each document
+in that field. The Workbench no longer shows, exports or searches that value, but the text
+remains in the file and in any earlier CSV or Excel exports and backups. Treat such
+databases as containing document text.
+
+These later-stage features still store extracted text and must not be used with real
+documents until they are redesigned: `archive-family-build` (claim sentences and
+excerpts), `archive-section-build` (section headings and excerpts) and the
+`archive-section-dataset-*` commands built on them, and the `research.claims` plugin
+(matching lines, in the jobs database).
+
 ## Find admitted documents again
 
 ```powershell
@@ -214,8 +237,8 @@ Files that are missing, changed since intake, unreadable or too large are listed
 `not_searchable_sources`. Both lists are always complete, even when `--limit` truncates
 the results, and the current contents of an unverified file are never shown. Such files
 can still appear through recorded metadata: `metadata_matches` names the fields (file
-name, generated summary, review note) that contain the search text without quoting
-them. A hash match shows the text is what was admitted, not that it is true; a review
+name, your review topic, note or research question) that contain the search text without
+quoting them. A hash match shows the text is what was admitted, not that it is true; a review
 decision is not permission to move, export or disclose a document. The database is
 opened read-only.
 

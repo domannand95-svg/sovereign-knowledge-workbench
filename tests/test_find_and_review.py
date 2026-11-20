@@ -109,9 +109,8 @@ def test_missing_source_is_reported_not_dropped(archive):
     (docs / "cuttings.txt").unlink()
     with connect(db) as database:
         result = search_archive(database, "Grevillea")
-    [hit] = result["results"]  # still found through its recorded summary, labelled as such
-    assert hit["verification"] == "MISSING" and hit["content_matches"] == []
-    assert hit["metadata_matches"] == ["model_summary"]
+    # No stored text exists to match, so a missing file is not a result; it is still listed.
+    assert result["results"] == []
     assert [(s["relative_path"], s["status"]) for s in result["unverified_sources"]] == [
         ("cuttings.txt", "MISSING")]
 
@@ -215,7 +214,7 @@ def test_result_limit_never_hides_unverified_sources(tmp_path, capsys):
     (docs / "z_changed.txt").write_text("tampered needle\n", encoding="utf-8")
     found = _run(capsys, "archive-search", "needle", "--state-db", str(db), "--limit", "2")
     assert len(found["results"]) == 2 and found["truncated"] is True
-    assert found["matching_sources"] == 4  # the changed file still matches on its summary
+    assert found["matching_sources"] == 3  # the changed file has no stored text to match
     assert [(s["relative_path"], s["status"]) for s in found["unverified_sources"]] == [
         ("z_changed.txt", "CHANGED_SINCE_INTAKE")]
 

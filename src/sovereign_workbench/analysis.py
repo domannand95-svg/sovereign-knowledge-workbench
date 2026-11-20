@@ -28,6 +28,16 @@ RESEARCH_CUES = (
 )
 
 
+# Document text is never stored. A candidate's summary field holds only this marker (or ""
+# when the file has no readable text); the text itself is read from the hash-verified file.
+NOT_STORED_SUMMARY = "Not stored: read the verified document."
+
+
+def stored_summary(text: str | None) -> str:
+    """The only value a stored summary may take: the marker, or "" when there is no text."""
+    return NOT_STORED_SUMMARY if text and text.strip() else ""
+
+
 def classify(record: FileRecord, taxonomy: Taxonomy | None = None) -> Classification:
     text = (record.extracted_text or "").casefold()
     rules = taxonomy.modules if taxonomy else MODULE_RULES
@@ -42,7 +52,7 @@ def classify(record: FileRecord, taxonomy: Taxonomy | None = None) -> Classifica
         module = taxonomy.fallback_module if taxonomy else "unclassified"
     confidence = min(0.95, 0.35 + score * 0.1) if score else 0.0
     labels = tuple(sorted(name for name, value in scores.items() if value > 0))
-    summary = " ".join((record.extracted_text or "").split())[:280]
+    summary = stored_summary(record.extracted_text)
     source = f"taxonomy:{taxonomy.taxonomy_id}:{taxonomy.sha256}" if taxonomy else "deterministic_heuristic"
     return Classification(module, confidence, labels, summary, source)
 

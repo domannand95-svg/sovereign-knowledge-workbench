@@ -22,7 +22,8 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              pending_source_ids, stale_pending as stale_pending_sources,
                              export_review_csv, export_review_xlsx, import_review_csv,
                              relationship_counts, routing_counts,
-                             open_import_exclusions, record_import_exclusions)
+                             open_import_exclusions, record_import_exclusions,
+                             stored_text_inventory)
 from .review_batches import _check_limit as check_batch_limit
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
@@ -504,6 +505,7 @@ def main(argv: list[str] | None = None) -> int:
             with connect_review_batches(args.state_db) as database:
                 print(json.dumps({"status": review_batch_counts(database),
                                   "excluded": open_import_exclusions(database),
+                                  "stored_document_text": stored_text_inventory(database),
                                   "routing": routing_counts(database),
                                   "relationship_counts": relationship_counts(database)}, sort_keys=True))
             return 0

@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from .review_batches import REVIEW_COLUMNS, connect, record_review_decision
+from .review_batches import REVIEW_COLUMNS, SUMMARY_SQL, connect, record_review_decision
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,7 @@ class ReviewController:
     def pending(self) -> list[ReviewItem]:
         rows = self.database.execute(
             "SELECT i.batch_id,s.source_id,s.root,s.relative_path,s.source_sha256,s.size_bytes,"
-            "s.modified_ns,s.extraction_status,COALESCE(c.model_summary,''),"
+            f"s.modified_ns,s.extraction_status,{SUMMARY_SQL},"
             "COALESCE(c.proposed_topic,''),COALESCE(c.proposed_maturity,''),"
             "COALESCE(c.proposed_authority,''),COALESCE(c.proposal_reason,''),"
             "COALESCE(r.classification_confidence,0.0),"
