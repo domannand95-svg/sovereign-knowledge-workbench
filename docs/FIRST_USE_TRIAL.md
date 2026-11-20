@@ -49,8 +49,10 @@ Ctrl+C) and run it again.
 ```
 
 The browser screen shows one file at a time. Decide only after reading the document
-text shown below the summary. Files that changed or moved since import cannot be decided;
-use **Skip for now**. Alternatively, export a batch to CSV with `archive-batch-export`,
+text shown below the summary. The choices are APPROVE, NEEDS RESEARCH, QUARANTINE and
+REJECT; each needs a short note. **Skip for now** records nothing. Files that changed or
+moved since import are set aside automatically and listed at the top of the screen;
+nothing is recorded for them. Alternatively, export a batch to CSV with `archive-batch-export`,
 fill in the decision columns, and load it with `archive-review-import`.
 
 ## 4. Find documents that need attention
@@ -58,11 +60,11 @@ fill in the decision columns, and load it with `archive-review-import`.
 | What | Where it shows |
 |---|---|
 | **Excluded** (larger than `--max-file-mb`, never imported) | `excluded` in the `archive-batch-create` output and in `archive-batch-status`, plus a warning |
-| **Changed, moved or missing** since import | `unverified_sources` in any `archive-search` result (the list is always complete); such files are blocked on the review screen |
-| **Changed before batching** (after an interrupted import) | `stale_pending` in the `archive-batch-create` output, plus a warning. They stay counted as `pending` |
+| **Changed, moved or missing** since import | The "Not searched" list of any `archive-search` (always complete; a moved file shows where the same content now is, when known); the review screen lists them as set aside |
+| **Changed before batching** (after an interrupted import) | `archive-batch-status` under "Waiting to be batched", each with its state and an explanation; also a warning from `archive-batch-create` |
 | **No readable text** (empty, scanned, unreadable format) | `not_searchable_sources` in `archive-search`; they can still be reviewed after you open the file itself |
 | **Model fell back** (only with `--local-model`) | `model_failures` in the import output and a warning; each affected file says so in its proposal reason |
-| **Not yet reviewed** | `archive-batch-status`: `pending` (not batched yet) and `batched` (batched, no decision). `reviewed` and `quarantined` have a recorded human decision |
+| **Not yet reviewed** | `archive-batch-status`: "Waiting to be batched" and "Batched (waiting for a decision)". "Reviewed" and "Quarantined" have a recorded human decision |
 
 ```powershell
 .\.venv\Scripts\skw.exe archive-batch-status --state-db C:\skw-trial\review.db
@@ -71,6 +73,8 @@ fill in the decision columns, and load it with `archive-review-import`.
 ```powershell
 .\.venv\Scripts\skw.exe archive-search "any word" --state-db C:\skw-trial\review.db
 ```
+
+Both commands print plain text in a terminal; add `--format json` for the full details.
 
 ## 5. What a successful trial looks like
 

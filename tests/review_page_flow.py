@@ -145,7 +145,7 @@ def _flow(SOURCE_DOCS: Path, chrome: str):
             note = f"Browser test note for {name}"
             page.fill("#note", note)
             check(f"[{name}] buttons enabled after writing a note", all(state(page)["enabled"]))
-            choice = ["APPROVE", "RESEARCH", "QUARANTINE", "REJECT"][index]
+            choice = ["APPROVE", "NEEDS_RESEARCH", "QUARANTINE", "REJECT"][index]
             page.click(f"button[data-choice='{choice}']")
             try:
                 page.wait_for_function(

@@ -23,7 +23,8 @@ from .review_batches import (admit as admit_review_sources, connect as connect_r
                              export_review_csv, export_review_xlsx, import_review_csv,
                              relationship_counts, routing_counts,
                              open_import_exclusions, record_import_exclusions,
-                             stored_text_inventory)
+                             stored_text_inventory, pending_overview)
+from .readable import render_search, render_status
 from .review_batches import _check_limit as check_batch_limit
 from .review_batches import export_research_tickets, export_staging_manifest, export_training_split
 from .review_batches import list_intake_roots, register_intake_root
@@ -75,6 +76,11 @@ def _select_manifest_records(root: Path, records: list, manifest_path: Path) -> 
             raise ValueError("Archive selection identity mismatch")
         selected.append(record)
     return selected
+
+
+def _wants_text(choice: str) -> bool:
+    """Readable text when asked, or by default at an interactive terminal; JSON otherwise."""
+    return choice == "text" or (choice == "auto" and sys.stdout.isatty())
 
 
 def _deduplicate_records(records: list, admitted_hashes: set[str], limit: int) -> list:
@@ -194,10 +200,14 @@ def parser() -> argparse.ArgumentParser:
     batch_import.add_argument("review_csv", type=Path); batch_import.add_argument("--state-db", required=True, type=Path)
     batch_status = commands.add_parser("archive-batch-status", help="Show durable archive review counts")
     batch_status.add_argument("--state-db", required=True, type=Path)
+    batch_status.add_argument("--format", choices=("auto", "json", "text"), default="auto",
+                              help="text for people, json for scripts; auto uses text at a terminal")
     archive_search = commands.add_parser("archive-search", help="Search admitted sources read-only, verifying each file against its intake hash")
     archive_search.add_argument("query"); archive_search.add_argument("--state-db", required=True, type=Path)
     archive_search.add_argument("--limit", type=int, default=50)
     archive_search.add_argument("--max-file-mb", type=int, default=20)
+    archive_search.add_argument("--format", choices=("auto", "json", "text"), default="auto",
+                                help="text for people, json for scripts; auto uses text at a terminal")
     research_export = commands.add_parser("archive-research-export", help="Export approved draft research tickets")
     research_export.add_argument("--state-db", required=True, type=Path); research_export.add_argument("--output", required=True, type=Path)
     research_import = commands.add_parser("archive-research-import", help="Import immutable hash-bound returned research evidence")
@@ -475,7 +485,8 @@ def main(argv: list[str] | None = None) -> int:
                     more = f" and {len(excluded) - 5} more" if len(excluded) > 5 else ""
                     print(f"warning: {len(excluded)} file{'s were' if len(excluded) != 1 else ' was'} "
                           f"not imported because {'they are' if len(excluded) != 1 else 'it is'} larger "
-                          f"than --max-file-mb {args.max_file_mb}: {shown}{more}. They are listed under "
+                          f"than --max-file-mb {args.max_file_mb}: {shown}{more}. "
+                          f"{'They are' if len(excluded) != 1 else 'It is'} listed under "
                           "'excluded' here and in archive-batch-status; re-run with a larger "
                           "--max-file-mb to import them.", file=sys.stderr)
                 if stale:
@@ -503,11 +514,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "archive-batch-status":
             with connect_review_batches(args.state_db) as database:
-                print(json.dumps({"status": review_batch_counts(database),
-                                  "excluded": open_import_exclusions(database),
-                                  "stored_document_text": stored_text_inventory(database),
-                                  "routing": routing_counts(database),
-                                  "relationship_counts": relationship_counts(database)}, sort_keys=True))
+                value = {"status": review_batch_counts(database),
+                         "pending": pending_overview(database),
+                         "excluded": open_import_exclusions(database),
+                         "stored_document_text": stored_text_inventory(database),
+                         "routing": routing_counts(database),
+                         "relationship_counts": relationship_counts(database)}
+            print(render_status(value) if _wants_text(args.format)
+                  else json.dumps(value, sort_keys=True), end="" if _wants_text(args.format) else "\n")
             return 0
         if args.command == "archive-search":
             database = connect_readonly(args.state_db)
@@ -516,7 +530,9 @@ def main(argv: list[str] | None = None) -> int:
                                         max_file_bytes=args.max_file_mb * 1024 * 1024)
             finally:
                 database.close()
-            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            print(render_search(result) if _wants_text(args.format)
+                  else json.dumps(result, ensure_ascii=False, sort_keys=True),
+                  end="" if _wants_text(args.format) else "\n")
             return 0
         if args.command == "archive-research-export":
             with connect_review_batches(args.state_db) as database:

@@ -193,6 +193,20 @@ def _snippet(line: str, needle: str) -> str:
     return ("…" if left else "") + window + ("…" if left + MAX_LINE_CHARS < len(line) else "")
 
 
+def _with_same_content(unverified, by_hash, rows):
+    """Point a missing file at existing admitted paths in its root with the same content.
+
+    Possibly the same file renamed or moved, or an identical copy; never merged."""
+    sha_of = {source_id: sha256 for source_id, _root, _rel, sha256, _b, _s in rows}
+    for item in unverified:
+        if item["status"] == MISSING:
+            item["same_content_at"] = sorted({
+                path for other_id, path, other_root in by_hash.get(sha_of[item["source_id"]], [])
+                if other_id != item["source_id"] and other_root == item["intake_root"]
+                and path != item["relative_path"] and Path(other_root, path).is_file()})
+    return unverified
+
+
 def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
                    max_file_bytes: int = 20 * 1024 * 1024) -> dict[str, object]:
     needle = query.strip()
@@ -300,7 +314,7 @@ def search_archive(database: sqlite3.Connection, query: str, *, limit: int = 50,
         "matching_sources": matching_sources,
         "results": results,
         "truncated": matching_sources > len(results),
-        "unverified_sources": unverified,
+        "unverified_sources": _with_same_content(unverified, by_hash, rows),
         "not_searchable_sources": not_searchable,
         "note": ("Content matches are lines from files whose bytes match the intake hash; a "
                  "match shows the text is what was admitted, not that it is true. "

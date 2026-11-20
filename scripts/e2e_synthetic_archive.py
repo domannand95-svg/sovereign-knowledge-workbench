@@ -317,21 +317,26 @@ def run(files: int, workdir: Path, seed: int, kill_after: float) -> dict[str, ob
         stop()
     r.timings["review_screen_pass"] = round(time.perf_counter() - started, 3)
     r.check("review screen reaches the end of the queue", final["item"] is None and final["remaining"] == 0, final)
-    r.check("moved file is skipped, not decided", screen_skipped >= 1 and final["skipped"] == screen_skipped,
-            {"skipped": screen_skipped})
-    call, stop = _review_api(db)  # restart: skipped files come back, nothing was recorded for them
+    set_aside = [(a["source_path"], a["status"]) for a in final.get("set_aside", [])]
+    moved_path = last_items[0]["relative_path"]
+    r.check("moved file is set aside and listed, not decided",
+            set_aside == [(moved_path, "MISSING")] and final["skipped"] == screen_skipped,
+            {"set_aside": set_aside, "skipped": screen_skipped})
+    undecided = screen_skipped + len(set_aside)
+    gone.with_name(gone.name + ".moved").rename(gone)
+    call, stop = _review_api(db)  # restored, then restart: the file comes back, nothing was recorded
     try:
         again = call("GET", "/api/next")[1]
     finally:
         stop()
-    r.check("skipped files return after restart", again["item"] is not None and again["skipped"] == 0
-            and again["remaining"] == screen_skipped, {"remaining": again["remaining"]})
-    gone.with_name(gone.name + ".moved").rename(gone)
+    r.check("set-aside file returns once restored", again["item"] is not None
+            and again["item"]["source_path"] == moved_path and again["skipped"] == 0
+            and again["remaining"] == undecided, {"remaining": again["remaining"]})
 
     status = r.skw("archive-batch-status", "--state-db", str(db))["status"]
     r.check("reviewed + quarantined counts match decisions",
             status["quarantined"] == decisions["QUARANTINE"]
-            and status["reviewed"] == batched - decisions["QUARANTINE"] - screen_skipped,
+            and status["reviewed"] == batched - decisions["QUARANTINE"] - undecided,
             {"status": status, "decisions": decisions, "screen_decided": screen_decided})
 
     # Search: verified hits, non-Latin text through a pipe, complete unverified lists.

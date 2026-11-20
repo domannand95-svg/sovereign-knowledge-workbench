@@ -694,9 +694,83 @@ def pending_source_ids(root: Path, records: list[FileRecord]) -> frozenset[str]:
 def stale_pending(database: sqlite3.Connection, root: Path,
                   current: frozenset[str]) -> list[dict[str, object]]:
     """Pending sources of this root whose admitted bytes are no longer at their path."""
-    return [{"source_id": row[0], "relative_path": row[2], "source_sha256": row[3]}
-            for row in database.execute(_PENDING_ITEMS_FOR_ROOT_SQL, (_root_key(root),)).fetchall()
-            if row[0] not in current]
+    stale = []
+    for row in database.execute(_PENDING_ITEMS_FOR_ROOT_SQL, (_root_key(root),)).fetchall():
+        if row[0] in current:
+            continue
+        missing = not Path(row[1], row[2]).exists()
+        stale.append({"source_id": row[0], "relative_path": row[2], "source_sha256": row[3],
+                      "state": "MISSING" if missing else "CHANGED_SINCE_ADMISSION",
+                      "same_content_at": same_content_paths(database, row[1], row[3], row[2])
+                      if missing else []})
+    return stale
+
+
+PENDING_EXPLANATIONS = {
+    "WAITING": "Admitted; the next import of its folder will put it in a batch.",
+    "CHANGED_SINCE_ADMISSION": ("Changed after it was admitted, so this admitted version cannot be "
+                                "batched. The next import admits the current version as a new file."),
+    "MISSING": "No longer at this path (moved, renamed or deleted), so it cannot be batched.",
+}
+
+
+def same_content_paths(database: sqlite3.Connection, root: str, sha256: str,
+                       exclude_path: str) -> list[str]:
+    """Other admitted paths in this root with exactly the same content that exist now.
+
+    Same content is evidence of a possible rename or move, or of an identical copy; it is
+    never treated as proof that two records are the same file, and records are not merged.
+    """
+    return [path for (path,) in database.execute(
+        "SELECT DISTINCT relative_path FROM review_sources WHERE root=? AND source_sha256=? "
+        "AND relative_path<>? ORDER BY relative_path", (root, sha256, exclude_path))
+        if Path(root, path).is_file()]
+
+
+def _pending_state(root: str, relative: str, sha256: str, size: int, modified_ns: int) -> str:
+    path = Path(root, relative)
+    try:
+        stat = path.stat()
+    except OSError:
+        return "MISSING"
+    if not path.is_file():
+        return "MISSING"
+    if stat.st_size == size and stat.st_mtime_ns == modified_ns:
+        return "WAITING"
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError:
+        return "MISSING"
+    return "WAITING" if digest.hexdigest() == sha256 else "CHANGED_SINCE_ADMISSION"
+
+
+def pending_overview(database: sqlite3.Connection, *, limit: int = 100) -> dict[str, object]:
+    """Name each pending source, its state now, and what that means. Read-only.
+
+    A file whose size and timestamp still match is reported as waiting without re-hashing;
+    batching re-hashes every file regardless, so this is a display, never a gate.
+    """
+    files, by_state = [], {}
+    rows = database.execute(
+        "SELECT root,relative_path,source_sha256,size_bytes,modified_ns FROM review_sources "
+        "WHERE state='pending' ORDER BY root,relative_path,source_id").fetchall()
+    for source_root, relative, sha256, size, modified_ns in rows:
+        state = _pending_state(source_root, relative, sha256, size, modified_ns)
+        by_state[state] = by_state.get(state, 0) + 1
+        if len(files) >= limit:
+            continue
+        same = same_content_paths(database, source_root, sha256, relative) if state == "MISSING" else []
+        explanation = PENDING_EXPLANATIONS[state]
+        if same:
+            explanation += (" A file with exactly the same content is at " + ", ".join(same)
+                            + "; it may be this file renamed or moved, or an identical copy. "
+                            "The records stay separate.")
+        files.append({"intake_root": source_root, "relative_path": relative, "state": state,
+                      "same_content_at": same, "explanation": explanation})
+    return {"count": len(rows), "by_state": by_state, "files": files, "truncated": len(rows) > len(files)}
 
 
 def _begin_batch_transaction(database: sqlite3.Connection) -> None:
@@ -1130,8 +1204,10 @@ def review_row_problems(row: dict[str, str]) -> list[str]:
     problems = []
     for field, allowed in _CONTROLLED_FIELDS:
         if row.get(field, "") not in allowed:
+            hint = (" (use NEEDS_RESEARCH, the stored name of the screen's NEEDS RESEARCH choice)"
+                    if field == "decision" and row.get(field, "").strip().upper() == "RESEARCH" else "")
             problems.append(f"{field} {row.get(field, '')!r} is not one of: "
-                            + ", ".join(sorted(allowed)))
+                            + ", ".join(sorted(allowed)) + hint)
     if not row.get("reviewer", "").strip():
         problems.append("reviewer is required")
     if not row.get("review_note", "").strip():

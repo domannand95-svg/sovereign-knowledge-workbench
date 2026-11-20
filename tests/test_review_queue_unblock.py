@@ -115,8 +115,16 @@ def test_missing_file_can_be_skipped_and_the_queue_continues(screen):
     assert _decision_count(db) == 2  # skipping records nothing
 
     assert call("POST", "/api/skipped/reset", {}) == (200, {"skipped": 0})
+    # Still missing: since the 2026-11-20 usability batch it is set aside and listed rather
+    # than served first again; nothing is recorded for it.
     again = call("GET", "/api/next")[1]
-    assert again["item"]["source_path"] == "a-first.txt" and again["skipped"] == 0
+    assert again["item"] is None and again["skipped"] == 0
+    assert [(a["source_path"], a["status"]) for a in again["set_aside"]] == [("a-first.txt", "MISSING")]
+    (docs / "a-renamed.txt").rename(docs / "a-first.txt")  # restored: it returns
+    call("POST", "/api/skipped/reset", {})
+    restored = call("GET", "/api/next")[1]
+    assert restored["item"]["source_path"] == "a-first.txt" and restored["set_aside"] == []
+    assert _decision_count(db) == 2
 
 
 def test_only_the_current_file_can_be_skipped(screen):
