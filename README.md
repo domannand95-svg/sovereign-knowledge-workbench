@@ -107,7 +107,10 @@ For a simpler one-file-at-a-time Windows review screen:
 
 The screen shows the bounded summary and deterministic review reason, then
 offers large **APPROVE**, **RESEARCH**, **QUARANTINE**, and **REJECT** choices.
-It re-hashes the exact source immediately before accepting a decision,
+A file that has moved or changed since import cannot be decided; **Skip for now**
+moves past it without recording anything, and skipped files return the next time
+the screen is opened. A file that still matches its import but has no readable
+text can be decided after checking the file itself. It re-hashes the exact source immediately before accepting a decision,
 automatically records the named human reviewer, and proposes an editable
 research question when needed. It has no file movement, deletion, staging,
 publication, dispatch, canonical-promotion, or training capability.

@@ -159,7 +159,9 @@ def read_verified_text(root: str, relative: str, expected_sha256: str, *,
         elif text.startswith("\ufeff"):
             text = text[1:]
     truncated = text is not None and len(text) > max_chars
+    # hash_verified: the bytes match the intake hash, whether or not text could be shown.
     return {"status": status, "verified": status == VERIFIED,
+            "hash_verified": status in (VERIFIED, NO_TEXT),
             "status_message": STATUS_MESSAGES[status],
             "text": text[:max_chars] if text is not None else None, "truncated": truncated}
 

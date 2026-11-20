@@ -71,13 +71,14 @@ class ReviewController:
             "COALESCE(r.review_route,'MANUAL_REVIEW_REQUIRED'),"
             "COALESCE(r.route_reasons,'candidate routing is unavailable') "
             "FROM review_batch_items i JOIN review_sources s ON s.source_id=i.source_id "
+            "JOIN review_batches b ON b.batch_id=i.batch_id "
             "LEFT JOIN archive_review_candidates c ON c.source_id=s.source_id "
             "LEFT JOIN archive_review_routes r ON r.source_id=s.source_id "
             "WHERE NOT EXISTS (SELECT 1 FROM archive_review_decisions d "
             "WHERE d.source_id=s.source_id AND d.batch_id=i.batch_id) "
             "ORDER BY CASE COALESCE(r.review_route,'MANUAL_REVIEW_REQUIRED') "
             "WHEN 'RECOVERY_REQUIRED' THEN 0 WHEN 'MANUAL_REVIEW_REQUIRED' THEN 1 ELSE 2 END,"
-            "i.batch_id,i.ordinal"
+            "b.sequence,i.ordinal"
         ).fetchall()
         return [ReviewItem(row[0], row[1], row[2], row[3], row[4], row[6], row[7], row[8],
                            row[9], row[10], row[11], row[12], row[13], row[14], row[15])
@@ -87,8 +88,12 @@ class ReviewController:
                research_question: str = "") -> int:
         if not note.strip():
             raise ValueError("Write a short review note in your own words before choosing a decision")
-        root = Path(item.root).resolve(strict=True)
-        source = (root / item.source_path).resolve(strict=True)
+        try:
+            root = Path(item.root).resolve(strict=True)
+            source = (root / item.source_path).resolve(strict=True)
+        except FileNotFoundError:
+            raise ValueError("The file is no longer at its imported location; "
+                             "review acceptance is blocked") from None
         if not source.is_relative_to(root):
             raise ValueError("The source path escapes its admitted archive root")
         size = self.database.execute(
