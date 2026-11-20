@@ -42,7 +42,7 @@ def prepared(tmp_path: Path):
 
 def test_review_is_one_file_at_a_time_and_records_human_without_file_mutation(tmp_path: Path):
     source, database = prepared(tmp_path)
-    controller = ReviewController(database, "Dominic Annand")
+    controller = ReviewController(database, "Synthetic Reviewer")
     items = controller.pending()
     assert [item.source_path for item in items] == ["broken.docx", "uncertain.txt"]
     item = items[0]
@@ -52,14 +52,14 @@ def test_review_is_one_file_at_a_time_and_records_human_without_file_mutation(tm
     row = database.execute(
         "SELECT decision,reviewer,authority,canonical_status FROM archive_review_decisions"
     ).fetchone()
-    assert row == ("QUARANTINE", "Dominic Annand", "Non-authoritative candidate", "UNRESOLVED")
+    assert row == ("QUARANTINE", "Synthetic Reviewer", "Non-authoritative candidate", "UNRESOLVED")
     assert [pending.source_path for pending in controller.pending()] == ["uncertain.txt"]
     database.close()
 
 
 def test_source_hash_change_blocks_acceptance(tmp_path: Path):
     source, database = prepared(tmp_path)
-    controller = ReviewController(database, "Dominic")
+    controller = ReviewController(database, "Synthetic Reviewer")
     item = next(value for value in controller.pending() if value.source_path == "uncertain.txt")
     (source / item.source_path).write_text("changed after admission", encoding="utf-8")
     with pytest.raises(ValueError, match="size changed|hash changed"):
@@ -70,7 +70,7 @@ def test_source_hash_change_blocks_acceptance(tmp_path: Path):
 
 def test_research_requires_and_proposes_a_specific_question(tmp_path: Path):
     _, database = prepared(tmp_path)
-    controller = ReviewController(database, "Dominic")
+    controller = ReviewController(database, "Synthetic Reviewer")
     item = next(value for value in controller.pending() if value.source_path == "uncertain.txt")
     proposal = propose_research_question(item)
     assert "primary evidence" in proposal and "uncertainty" in proposal
@@ -81,7 +81,7 @@ def test_research_requires_and_proposes_a_specific_question(tmp_path: Path):
     stored = database.execute(
         "SELECT research_question,reviewer FROM archive_review_decisions"
     ).fetchone()
-    assert stored == (proposal, "Dominic")
+    assert stored == (proposal, "Synthetic Reviewer")
     database.close()
 
 
@@ -89,7 +89,7 @@ def test_unknown_decision_and_empty_reviewer_fail_closed(tmp_path: Path):
     _, database = prepared(tmp_path)
     with pytest.raises(ValueError, match="reviewer name"):
         ReviewController(database, " ")
-    controller = ReviewController(database, "Dominic")
+    controller = ReviewController(database, "Synthetic Reviewer")
     with pytest.raises(ValueError, match="invalid controlled value"):
         controller.accept(controller.pending()[0], "DELETE", note="Not permitted")
     assert database.execute("SELECT COUNT(*) FROM archive_review_decisions").fetchone()[0] == 0
@@ -98,7 +98,7 @@ def test_unknown_decision_and_empty_reviewer_fail_closed(tmp_path: Path):
 
 def test_path_escape_in_tampered_database_is_rejected(tmp_path: Path):
     source, database = prepared(tmp_path)
-    controller = ReviewController(database, "Dominic")
+    controller = ReviewController(database, "Synthetic Reviewer")
     item = next(value for value in controller.pending() if value.source_path == "uncertain.txt")
     outside = tmp_path / "outside.txt"
     outside.write_bytes((source / item.source_path).read_bytes())

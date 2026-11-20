@@ -102,7 +102,7 @@ For a simpler one-file-at-a-time Windows review screen:
 ```powershell
 .\scripts\start-local-review.ps1 `
   -StateDb .\workbench-output\archive-review.db `
-  -Reviewer "Dominic Annand"
+  -Reviewer "Your name"
 ```
 
 The screen shows the document text, read from the file only after its fingerprint

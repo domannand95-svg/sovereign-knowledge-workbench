@@ -20,7 +20,7 @@ def request(url: str, token: str = "", payload: dict | None = None):
 
 
 def running_server(database_path: Path):
-    server, token = make_server(database_path, "Dominic", "fixed-test-token")
+    server, token = make_server(database_path, "Synthetic Reviewer", "fixed-test-token")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread, token, f"http://127.0.0.1:{server.server_port}"
@@ -69,7 +69,7 @@ def test_browser_decision_is_hash_bound_and_append_only(tmp_path: Path):
         server.server_close()
         thread.join(timeout=3)
     check = connect(tmp_path / "review.db")
-    assert check.execute("SELECT decision,reviewer FROM archive_review_decisions").fetchone() == ("QUARANTINE", "Dominic")
+    assert check.execute("SELECT decision,reviewer FROM archive_review_decisions").fetchone() == ("QUARANTINE", "Synthetic Reviewer")
     check.close()
 
 
