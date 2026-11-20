@@ -397,8 +397,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.selection_manifest:
                 records = _select_manifest_records(args.root, records, args.selection_manifest)
             with connect_review_batches(args.state_db) as database:
-                excluded = record_import_exclusions(database, args.root, records,
-                                                    args.max_file_mb * 1024 * 1024)
+                considered = records  # what this import looked at, before de-duplication
                 if args.deduplicate_hash:
                     admitted_hashes = {row[0] for row in database.execute(
                         "SELECT DISTINCT source_sha256 FROM review_sources"
@@ -449,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
                     relationships = detect_relationships(selected_records, corpus_records)
                     batch, candidate_count, relationship_count = commit_prepared_review_batch(
                         database, prepared, candidates, relationships, limit=args.limit)
+                # Recorded only once the import has passed its checks and committed.
+                excluded = record_import_exclusions(database, args.root, considered,
+                                                    args.max_file_mb * 1024 * 1024)
                 print(json.dumps({"admitted": admitted, "candidates": candidate_count,
                     "excluded": excluded,
                     "relationships": relationship_count, "model_failures": model_failures,

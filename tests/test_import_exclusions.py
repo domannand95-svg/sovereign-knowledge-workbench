@@ -76,6 +76,47 @@ def test_later_import_with_a_larger_limit_clears_the_open_exclusion(archive, cap
         assert database.execute("SELECT COUNT(*) FROM archive_import_exclusions").fetchone()[0] == 1
 
 
+def test_file_that_grew_past_the_limit_after_import_stays_listed(tmp_path, capsys):
+    # Independent review finding: an earlier admitted version must not hide a newer exclusion.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "grow.txt").write_bytes(b"small at first\n")
+    db = tmp_path / "a.db"
+    assert main(["archive-intake-register", str(docs), "--state-db", str(db), "--purpose", "t",
+                 "--include", ".txt"]) == 0
+    capsys.readouterr()
+    _create(capsys, docs, db, "--max-file-mb", "1")
+    (docs / "grow.txt").write_bytes(b"y" * (2 * 1024 * 1024))
+    outcome, _ = _create(capsys, docs, db, "--max-file-mb", "1")
+    assert [item["relative_path"] for item in outcome["excluded"]] == ["grow.txt"]
+    status = _status(capsys, db)
+    assert status["excluded"]["count"] == 1
+    assert status["excluded"]["files"][0]["size_bytes"] == 2 * 1024 * 1024
+
+
+def test_unregistered_root_records_no_exclusion(tmp_path, capsys):
+    # Independent review finding: nothing is written before the import's checks pass.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "big.txt").write_bytes(b"x" * (2 * 1024 * 1024))
+    db = tmp_path / "a.db"
+    assert main(["archive-batch-create", str(docs), "--state-db", str(db), "--include", ".txt",
+                 "--max-file-mb", "1"]) == 3
+    assert "not registered" in capsys.readouterr().err
+    with sqlite3.connect(db) as database:
+        assert database.execute("SELECT COUNT(*) FROM archive_import_exclusions").fetchone()[0] == 0
+
+
+def test_status_lists_one_row_per_excluded_path(archive, capsys, monkeypatch):
+    import sovereign_workbench.review_batches as review_batches
+    docs, db = archive
+    monkeypatch.setattr(review_batches, "_now", lambda: "2026-11-20T00:00:00.000000Z")
+    _create(capsys, docs, db, "--max-file-mb", "1")
+    _create(capsys, docs, db, "--max-file-mb", "2")  # same path, same timestamp, different limit
+    files = _status(capsys, db)["excluded"]["files"]
+    assert [item["relative_path"] for item in files] == ["big.txt"]
+
+
 def test_nothing_excluded_reports_an_empty_list(archive, capsys):
     docs, db = archive
     outcome, err = _create(capsys, docs, db)

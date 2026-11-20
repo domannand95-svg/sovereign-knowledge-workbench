@@ -593,15 +593,21 @@ def record_import_exclusions(database: sqlite3.Connection, root: Path, records: 
 
 
 def open_import_exclusions(database: sqlite3.Connection, *, limit: int = 100) -> dict[str, object]:
-    """Excluded files not admitted since: each path's latest exclusion, oldest path first."""
-    rows = database.execute(
+    """Each path's latest exclusion, unless a version of that path was admitted after it.
+
+    An admission from before the exclusion does not clear it: the excluded file may be a
+    newer version that was never imported.
+    """
+    latest: dict[tuple[str, str], tuple] = {}
+    for row in database.execute(
         "SELECT e.root,e.relative_path,e.size_bytes,e.reason,e.limit_bytes,e.observed_at "
-        "FROM archive_import_exclusions e WHERE NOT EXISTS (SELECT 1 FROM review_sources s "
-        "WHERE s.root=e.root AND s.relative_path=e.relative_path) "
-        "AND e.observed_at=(SELECT MAX(o.observed_at) FROM archive_import_exclusions o "
-        "WHERE o.root=e.root AND o.relative_path=e.relative_path) "
-        "ORDER BY e.root,e.relative_path"
-    ).fetchall()
+        "FROM archive_import_exclusions e "
+        "ORDER BY e.root,e.relative_path,e.observed_at DESC,e.exclusion_id DESC"
+    ):
+        latest.setdefault((row[0], row[1]), row)
+    rows = [row for (root, relative), row in latest.items() if not database.execute(
+        "SELECT 1 FROM review_sources WHERE root=? AND relative_path=? AND admitted_at>?",
+        (root, relative, row[5])).fetchone()]
     keys = ("intake_root", "relative_path", "size_bytes", "reason", "limit_bytes", "observed_at")
     return {"count": len(rows), "files": [dict(zip(keys, row)) for row in rows[:limit]]}
 
